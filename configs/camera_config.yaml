@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Dual-camera vision system (base + wrist)
+# ---------------------------------------------------------------------------
+# Device paths MUST be persistent /dev/v4l/by-id symlinks so a reboot can
+# never swap the base and wrist cameras (zero index-drift requirement).
+# Find yours with:  ls -l /dev/v4l/by-id/
+#
+# MJPG fourcc is required for low-latency 640x480 @ 30 FPS streaming; the
+# driver's default (YUYV) cannot sustain 30 FPS at this resolution.
+sync_tolerance_ms: 20.0 # software frame-sync warning threshold
+
+cameras:
+  - name: base
+    device_path: /dev/v4l/by-id/usb-SO101_BASE_CAMERA_640x480-video-index0
+    width: 640
+    height: 480
+    fps: 30.0
+    fourcc: MJPG
+    # Set a fixed exposure (in driver units) to stop auto-exposure from
+    # introducing frame-rate jitter under changing ambient light.
+    exposure: null
+    # Keep the driver queue short so control-loop reads stay fresh.
+    buffer_size: 1
+    allow_dynamic_path: false
+
+  - name: wrist
+    device_path: /dev/v4l/by-id/usb-SO101_WRIST_CAMERA_640x480-video-index0
+    width: 640
+    height: 480
+    fps: 30.0
+    fourcc: MJPG
+    exposure: null
+    buffer_size: 1
+    allow_dynamic_path: false
