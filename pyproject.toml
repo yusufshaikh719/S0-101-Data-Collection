@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "so101-collector"
+version = "0.1.0"
+description = "Production-grade multimodal data collection pipeline for SO-101 floor pick-and-place demonstrations"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyserial>=3.5",
+    "opencv-python>=4.8",
+    "PyYAML>=6.0",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+# H.264 video encoding (preferred over the OpenCV fallback).
+video = ["av>=11.0"]
+# LeRobot-compatible Parquet tables (falls back to .npz without it).
+parquet = ["pyarrow>=14.0"]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "av>=11.0",
+    "pyarrow>=14.0",
+]
+
+[project.scripts]
+so101-record = "so101_collector.scripts.record_episodes:main"
+so101-check-cameras = "so101_collector.scripts.check_cameras:main"
+so101-calibrate = "so101_collector.scripts.calibrate_joints:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["so101_collector"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
