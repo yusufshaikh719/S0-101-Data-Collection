@@ -7,6 +7,21 @@ build/
 dist/
 .venv/
 
+# Local agent / tooling metadata
+.freebuff/
+.cloud-attachments/
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Local backups and scratch copies
+*.bak
+*.orig
+*.rej
+*~
+
 # Recording artifacts
 data/
 *.rrd
