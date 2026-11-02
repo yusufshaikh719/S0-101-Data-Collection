@@ -76,9 +76,10 @@ across the 30×30 cm grid and include recovery demonstrations.
 
 Both YAML files in `configs/` are validated strictly on load:
 
-- Device paths must be persistent `/dev/.../by-id/...` symlinks so a reboot
-  cannot swap the arm or camera order. Dynamic paths such as `/dev/video0`
-  are rejected unless `allow_dynamic_path` or `allow_dynamic_port` is set.
+- Device paths must be persistent: `/dev/.../by-id/...` symlinks on Linux,
+  `/dev/cu.*` adapter names on macOS, or an OpenCV camera index. Dynamic paths
+  such as `/dev/video0` are rejected unless `allow_dynamic_path` or
+  `allow_dynamic_port` is set.
 - `robot_config.yaml` holds the bus settings, joint limits, home pose, leader
   port and IK link lengths.
 - `camera_config.yaml` holds both camera paths, resolution, frame rate and the
@@ -109,8 +110,27 @@ The suite needs no hardware. It covers packet framing and retries, joint
 clamping, FK/IK round trips, loop-timer drift, camera sync warnings, config
 validation, home-pose splitting and an end-to-end session on the simulated rig.
 
+## macOS
+
+The recording pipeline runs on macOS. Only SpaceMouse and gamepad input are
+Linux-only, so use the leader arm for teleoperation there.
+
+- Serial adapters appear as `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*`.
+  Those names embed the adapter's USB serial number and are accepted like a
+  Linux by-id link. `so101-setup` lists them through pyserial when the Linux
+  by-id directories are absent.
+- Cameras are OpenCV indices (`"0"`, `"1"`). `so101-setup` probes which
+  indices return a frame and writes the value quoted so YAML keeps it a
+  string. Grant the terminal camera access under System Settings → Privacy &
+  Security → Camera, or capture opens but never returns a frame.
+- MJPG, manual exposure and buffer-size controls are V4L2-specific; the
+  AVFoundation driver rejects them with a warning and falls back to the
+  requested resolution. Measure with `so101-check-cameras --duration 30`
+  before recording. If two cameras cannot both hold 30 FPS, lower `fps` in
+  `camera_config.yaml` and pass the same value to `so101-record --fps`, so
+  timestamps stay consistent with the delivered frames.
+
 ## Platform
 
-The rig targets Linux (V4L2, evdev and `/dev/*/by-id` paths). `--simulate`,
-leader-arm teleop, recording and the tests also run on Windows and macOS;
-SpaceMouse and gamepad input are Linux-only.
+The Linux rig adds V4L2 device paths and evdev input; recording, leader
+teleoperation and the tests also run on macOS and Windows.

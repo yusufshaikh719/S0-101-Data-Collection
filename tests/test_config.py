@@ -63,6 +63,15 @@ def test_persistent_paths_accepted():
     CameraConfig(name="base", device_path="/dev/v4l/by-path/pci-usb-video0")
 
 
+def test_macos_serial_paths_accepted():
+    for port in ("/dev/cu.usbmodem58FA0812345", "/dev/cu.usbserial-1410"):
+        assert make_robot_config(port=port).port == port
+
+
+def test_camera_index_accepted():
+    assert CameraConfig(name="base", device_path="0").device_path == "0"
+
+
 # ---------------------------------------------------------------------------
 # Strict validation
 # ---------------------------------------------------------------------------

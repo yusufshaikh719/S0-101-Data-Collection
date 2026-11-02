@@ -66,8 +66,17 @@ def coerce_frame(
     return frame
 
 
+def capture_source(path: str) -> int | str:
+    """Camera index as ``int`` (macOS/Windows) or a device path unchanged.
+
+    ``cv2.VideoCapture`` treats a string as a filename, so ``"0"`` would try to
+    open a file rather than the first camera.
+    """
+    return int(path) if path.isdigit() else path
+
+
 class V4L2Camera:
-    """OpenCV/V4L2 camera configured for low-latency high-speed streaming."""
+    """OpenCV camera configured for low-latency high-speed streaming."""
 
     def __init__(self, config: CameraConfig) -> None:
         self._config = config
@@ -92,7 +101,7 @@ class V4L2Camera:
         self._cv2 = cv2
 
         backend = cv2.CAP_V4L2 if path.startswith("/dev/") else cv2.CAP_ANY
-        capture = cv2.VideoCapture(path, backend)
+        capture = cv2.VideoCapture(capture_source(path), backend)
         if not capture.isOpened():
             capture.release()
             raise CameraError(f"camera '{self._config.name}': failed to open {path}")

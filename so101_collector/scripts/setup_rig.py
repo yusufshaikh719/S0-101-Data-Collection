@@ -106,6 +106,70 @@ def discover_video_devices(directory: Path = VIDEO_DIR) -> list[Device]:
     return scan_by_id(directory, include=lambda name: name.endswith("-video-index0"))
 
 
+#: Highest camera index probed when there are no by-id video nodes.
+PROBE_CAMERA_LIMIT = 6
+
+
+def platform_serial_devices() -> list[Device]:
+    """USB serial adapters via pyserial (macOS/Windows, or Linux without by-id)."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:  # pragma: no cover - pyserial is a hard dependency
+        return []
+
+    devices: list[Device] = []
+    for port in list_ports.comports():
+        path = port.device
+        # macOS exposes each adapter as both /dev/cu.* (callout) and /dev/tty.*;
+        # offer the callout node, which is what pyserial should open.
+        if sys.platform == "darwin" and not Path(path).name.startswith("cu."):
+            continue
+        devices.append(
+            Device(name=Path(path).name, path=path, target=port.description or "USB serial")
+        )
+    return sorted(devices, key=lambda device: device.path)
+
+
+def probe_camera_indices(limit: int = PROBE_CAMERA_LIMIT) -> list[Device]:
+    """Camera indices that OpenCV opens and can read a frame from."""
+    try:
+        import cv2
+    except ImportError:  # pragma: no cover - opencv is a hard dependency
+        return []
+
+    devices: list[Device] = []
+    for index in range(limit):
+        capture = cv2.VideoCapture(index, cv2.CAP_ANY)
+        try:
+            if not capture.isOpened():
+                continue
+            ok, frame = capture.read()
+        finally:
+            capture.release()
+        if not ok or frame is None:
+            continue
+        height, width = frame.shape[:2]
+        devices.append(
+            Device(name=f"camera {index}", path=str(index), target=f"{width}x{height}")
+        )
+    return devices
+
+
+def discover_serial_candidates() -> list[Device]:
+    """by-id links when present, otherwise pyserial's port list."""
+    return discover_serial_devices() or platform_serial_devices()
+
+
+def discover_video_candidates() -> list[Device]:
+    """by-id capture nodes when present, otherwise OpenCV indices."""
+    return discover_video_devices() or probe_camera_indices()
+
+
+def yaml_scalar(value: str) -> str:
+    """Quote values YAML would otherwise parse as numbers (camera indices)."""
+    return f'"{value}"' if value.isdigit() else value
+
+
 _YAML_KEY = re.compile(
     r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z_][A-Za-z0-9_]*):(?P<rest>[^\n]*)$", re.MULTILINE
 )
@@ -136,11 +200,11 @@ def update_config_file(path: Path, updates: Sequence[tuple[str, str, int]]) -> N
 
 
 def print_devices() -> None:
-    for label, directory, devices in (
-        ("serial (arms)", SERIAL_DIR, discover_serial_devices()),
-        ("video (cameras)", VIDEO_DIR, discover_video_devices()),
+    for label, devices in (
+        ("serial (arms)", discover_serial_candidates()),
+        ("cameras (video)", discover_video_candidates()),
     ):
-        print(f"{label} in {directory}:")
+        print(f"{label}:")
         if not devices:
             print("  (none found)")
             continue
@@ -149,8 +213,8 @@ def print_devices() -> None:
             print(f"  {index}) {device.name}{target}")
     if not SERIAL_DIR.exists() and not VIDEO_DIR.exists():
         print(
-            "\nNo by-id device directories on this host: run the rig on Linux, or point\n"
-            "--robot-config/--camera-config at a file with your own device paths."
+            "\nNo Linux by-id directories on this host; listing pyserial ports and\n"
+            "OpenCV camera indices instead."
         )
 
 
@@ -192,8 +256,8 @@ def _configure(
 
     print_devices()
     print()
-    serials = discover_serial_devices()
-    videos = discover_video_devices()
+    serials = discover_serial_candidates()
+    videos = discover_video_candidates()
 
     follower = _prompt_choice("Follower arm serial port", serials, robot.port)
     remaining = [device for device in serials if device.path != follower]
@@ -238,7 +302,7 @@ def _configure(
         ],
     )
     camera_updates = [
-        ("device_path", camera.device_path, index)
+        ("device_path", yaml_scalar(camera.device_path), index)
         for index, camera in enumerate(updated_vision.cameras)
     ]
     update_config_file(camera_path, camera_updates)
@@ -300,7 +364,13 @@ def check_device_paths(robot: RobotConfig, vision: VisionConfig) -> list[CheckRe
     targets.extend((camera.name, camera.device_path) for camera in vision.cameras)
 
     for name, path in targets:
-        if not path.startswith("/dev/"):
+        if path.isdigit():
+            results.append(
+                CheckResult(
+                    f"device {name}", "SKIP", f"camera index {path} (probed during capture)"
+                )
+            )
+        elif not path.startswith("/dev/"):
             results.append(
                 CheckResult(f"device {name}", "SKIP", f"{path} (not a /dev path; bench setup)")
             )

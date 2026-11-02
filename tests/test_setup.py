@@ -7,13 +7,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from so101_collector.core.camera_hub import capture_source
 from so101_collector.exceptions import SO101Error
 from so101_collector.scripts.calibrate_joints import (
     _apply_fields,
     summarize_home_samples,
     validate_home_pose,
 )
-from so101_collector.scripts.setup_rig import discover_video_devices, replace_yaml_scalar
+from so101_collector.scripts.setup_rig import (
+    discover_video_devices,
+    replace_yaml_scalar,
+    yaml_scalar,
+)
 from tests.conftest import make_robot_config
 
 
@@ -100,3 +105,14 @@ def test_apply_fields_moves_only_the_named_joint():
     assert updated.joints[-1].home_deg == 0.0
     assert updated.joints[0].home_deg == robot.joints[0].home_deg
     assert updated.joints[-1].offset_deg == robot.joints[-1].offset_deg
+
+
+def test_capture_source_converts_indices_only():
+    assert capture_source("0") == 0
+    path = "/dev/v4l/by-id/usb-A-video-index0"
+    assert capture_source(path) == path
+
+
+def test_yaml_scalar_quotes_numeric_camera_index():
+    assert yaml_scalar("0") == '"0"'
+    assert yaml_scalar("/dev/cu.usbmodem1") == "/dev/cu.usbmodem1"

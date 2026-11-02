@@ -30,7 +30,14 @@ JOINT_NAMES: tuple[str, ...] = (
     "gripper",
 )
 
-_PERSISTENT_SERIAL_PREFIXES = ("/dev/serial/by-id/", "/dev/serial/by-path/")
+_PERSISTENT_SERIAL_PREFIXES = (
+    "/dev/serial/by-id/",
+    "/dev/serial/by-path/",
+    # macOS/BSD expose USB adapters as /dev/cu.<name>; the name embeds the
+    # adapter's USB serial number, so it survives replugging like a by-id link.
+    "/dev/cu.",
+    "/dev/tty.",
+)
 _DYNAMIC_SERIAL_PATTERNS = (re.compile(r"/dev/ttyUSB\d+"), re.compile(r"/dev/ttyACM\d+"))
 _PERSISTENT_VIDEO_PREFIXES = ("/dev/v4l/by-id/", "/dev/v4l/by-path/")
 _DYNAMIC_VIDEO_PATTERN = re.compile(r"/dev/video\d+")
