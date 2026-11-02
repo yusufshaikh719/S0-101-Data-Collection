@@ -52,7 +52,8 @@ class SimulatedBus:
         self._config = config
         self._settle_speed = settle_speed_ticks_s
         self._positions: dict[int, float] = {
-            joint.servo_id: float(degrees_to_ticks(joint.home_deg)) for joint in config.joints
+            joint.servo_id: float(degrees_to_ticks(joint.home_deg, joint.offset_deg))
+            for joint in config.joints
         }
         self._goals: dict[int, float] = dict(self._positions)
         self._open = False

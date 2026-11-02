@@ -134,3 +134,78 @@ def test_abort_discards_episode_without_touching_disk(tmp_path):
     assert (writer.directory / "meta" / "episodes.jsonl").read_text().strip() == ""
     assert not hardware.is_open
     assert not hub.running
+
+
+def test_continuous_recording_splits_only_on_home_reentry(tmp_path):
+    from so101_collector.core.continuous_runner import ContinuousDataCollectionRunner
+    from so101_collector.core.lerobot_writer import LeRobotWriter
+
+    class FakeDataset:
+        def __init__(self):
+            self.meta = type("Meta", (), {"total_episodes": 0})()
+            self.pending = []
+            self.episodes = []
+
+        @classmethod
+        def create(cls, **kwargs):
+            return cls()
+
+        def add_frame(self, frame):
+            self.pending.append(frame)
+
+        def save_episode(self, parallel_encoding=True):
+            self.episodes.append(self.pending)
+            self.pending = []
+
+        def clear_episode_buffer(self):
+            self.pending = []
+
+        def finalize(self):
+            pass
+
+    robot = make_robot_config()
+    vision = make_vision_config(width=64, height=48)
+    hardware = SO101HardwareInterface(robot, bus=SimulatedBus(robot))
+    hub = CameraHub(vision, source_factory=lambda cfg: SimulatedCamera(cfg))
+    writer = LeRobotWriter(tmp_path, "continuous", fps=30,
+                           image_shapes={"base": (48, 64), "wrist": (48, 64)},
+                           dataset_class=FakeDataset)
+
+    class PoseTeleop:
+        def __init__(self):
+            self.tick = 0
+
+        def open(self):
+            pass
+
+        def close(self):
+            pass
+
+        def read(self, dt):
+            self.tick += 1
+            action = np.array(robot.home_pose, dtype=np.float32)
+            if 6 <= self.tick < 12 or 20 <= self.tick < 26:
+                action[0] += 20
+            return action
+
+    class QuitAfterTicks:
+        def __init__(self):
+            self.tick = 0
+
+        def read(self):
+            self.tick += 1
+            return Command.QUIT if self.tick > 34 else None
+
+        def close(self):
+            pass
+
+    runner = ContinuousDataCollectionRunner(
+        hardware=hardware, camera_hub=hub, teleop=PoseTeleop(), writer=writer,
+        commands=QuitAfterTicks(), fps=30, warmup_s=0.1,
+    )
+    stats = runner.run(max_seconds=10)
+    episodes = writer._dataset.episodes
+    assert len(episodes) == stats.episodes_saved == 3
+    assert sum(map(len, episodes)) == stats.frames_recorded
+    assert all(len(ep) > 1 for ep in episodes)
+    assert not hardware.is_open and not hub.running

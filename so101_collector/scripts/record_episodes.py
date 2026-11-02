@@ -13,19 +13,16 @@ Examples::
     # Full pipeline on a machine with no robot attached (smoke test)
     so101-record --simulate --max-episodes 2 --duration 60
 
-Episode protocol (see the specification, section 4.4)::
-
-    Space / trigger : start (2 s warmup, then record at 30 Hz)
-    Enter / green   : finish - atomically save MP4 + Parquet + manifest
-    Esc   / red     : abort - clear RAM buffers, nothing written
-    R               : reset arm to home pose
-    Q               : quit the session
+Recording starts automatically once cameras are ready. A measured return to
+the configured home pose splits the episode. Enter splits manually; Escape
+discards the current episode; Q saves the final partial episode and quits.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 from dataclasses import replace
@@ -45,16 +42,18 @@ from so101_collector.console import (
     TimedCommandReader,
 )
 from so101_collector.core.camera_hub import CameraHub, V4L2Camera
-from so101_collector.core.dataset_writer import DatasetWriter
+from so101_collector.core.continuous_runner import ContinuousDataCollectionRunner
+from so101_collector.core.lerobot_writer import LeRobotWriter
 from so101_collector.core.hardware_interface import SO101HardwareInterface
 from so101_collector.core.ik import SO101Kinematics
-from so101_collector.core.runner import DEFAULT_TASK, DataCollectionRunner
+from so101_collector.core.runner import DEFAULT_TASK
 from so101_collector.core.teleop_controller import (
     CartesianTeleop,
     LeaderArmTeleop,
     TeleopSource,
     gripper_limits_from_config,
 )
+from so101_collector.core.visualizer import NullVisualizer, RerunVisualizer
 from so101_collector.devices import GamepadButtonSource, SpaceMouseSource
 from so101_collector.exceptions import ConfigError, SO101Error
 from so101_collector.simulation import ScriptedTeleop, SimulatedBus, SimulatedCamera, StaticTeleop
@@ -91,17 +90,27 @@ def build_parser() -> argparse.ArgumentParser:
                      help="run with simulated hardware/cameras (no robot attached)")
 
     loop = parser.add_argument_group("loop")
-    loop.add_argument("--fps", type=float, default=30.0, help="control loop frequency")
-    loop.add_argument("--warmup", type=float, default=2.0, help="warmup seconds before buffering")
+    loop.add_argument("--fps", type=int, default=30, help="control loop frequency")
+    loop.add_argument("--warmup", type=float, default=0.0, help="optional camera warmup before recording")
+    loop.add_argument("--home-tolerance", type=float, default=5.0, metavar="DEGREES",
+                      help="maximum per-joint error for detecting home")
+    loop.add_argument("--home-exit-tolerance", type=float, default=8.0, metavar="DEGREES",
+                      help="joint error needed to re-arm home detection")
     loop.add_argument("--duration", type=float, default=None, help="stop after this many seconds")
     loop.add_argument("--max-episodes", type=int, default=None, help="stop after N completed episodes")
     loop.add_argument("--auto", type=float, default=None, metavar="SECONDS",
                       help="headless auto-pilot: save each episode after SECONDS of "
                            "recording (for CI/smoke runs; ignores the keyboard)")
 
+    vis = parser.add_argument_group("visualization")
+    vis.add_argument("--rerun", action="store_true",
+                     help="enable live Rerun visualization (spawns Rerun viewer window)")
+    vis.add_argument("--rerun-connect", default=None, metavar="ADDR",
+                     help="connect to an external running Rerun viewer (e.g. 127.0.0.1:9876)")
+    vis.add_argument("--rerun-save", type=Path, default=None, metavar="PATH",
+                     help="save the Rerun telemetry stream directly to an .rrd file")
+
     output = parser.add_argument_group("storage")
-    output.add_argument("--video-backend", choices=("auto", "av", "opencv"), default="auto")
-    output.add_argument("--table-backend", choices=("auto", "parquet", "npz"), default="auto")
     output.add_argument("--log-level", default="INFO",
                         choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser
@@ -186,7 +195,7 @@ def _build_commands(args: argparse.Namespace) -> CommandReader:
         reader = readers[0]
         if not reader.enabled:  # type: ignore[attr-defined]
             logger.warning("stdin is not a TTY and no gamepad configured - running headless "
-                           "(episodes limited by --duration/--max-episodes)")
+                           "(stop with --duration/--max-episodes or Ctrl-C)")
             return NullCommandReader()
         return reader
     return CompositeCommandReader(*readers)
@@ -201,6 +210,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         robot, vision = _load_configs(args)
+        if (args.fps <= 0 or args.warmup < 0 or not math.isfinite(args.warmup)
+                or not math.isfinite(args.home_tolerance) or args.home_tolerance <= 0
+                or not math.isfinite(args.home_exit_tolerance)
+                or args.home_exit_tolerance <= args.home_tolerance):
+            raise ConfigError("fps must be positive, warmup nonnegative, and home exit tolerance "
+                              "must exceed a positive home tolerance")
+        for name in ("base", "wrist"):
+            if vision.by_name[name].fps != args.fps:
+                raise ConfigError(f"camera {name} fps must match the recording fps ({args.fps})")
         follower = _build_hardware(robot, simulate=args.simulate)
 
         camera_hub = CameraHub(
@@ -208,20 +226,28 @@ def main(argv: list[str] | None = None) -> int:
             source_factory=(lambda cfg: SimulatedCamera(cfg)) if args.simulate else V4L2Camera,
         )
         teleop = _build_teleop(args, robot, follower)
-        commands = _build_commands(args)
-
         repo_id = args.repo_id or f"so101_floor_pick_{time.strftime('%Y%m%d_%H%M%S')}"
-        writer = DatasetWriter(
+        writer = LeRobotWriter(
             args.output_dir,
             repo_id,
             fps=args.fps,
-            image_shape=vision.by_name["base"].frame_shape,
-            video_preference=args.video_backend,
-            table_preference=args.table_backend,
+            image_shapes={name: vision.by_name[name].frame_shape for name in ("base", "wrist")},
         )
         logger.info("dataset directory: %s", writer.directory)
 
-        runner = DataCollectionRunner(
+        visualizer = NullVisualizer()
+        if args.rerun or args.rerun_connect or args.rerun_save:
+            visualizer = RerunVisualizer(
+                application_id="so101_collector",
+                recording_id=repo_id,
+                spawn=bool(args.rerun and not args.rerun_connect and not args.rerun_save),
+                connect_addr=args.rerun_connect,
+                save_path=args.rerun_save,
+            )
+
+        commands = _build_commands(args)
+        kinematics = SO101Kinematics(robot.kinematics)
+        runner = ContinuousDataCollectionRunner(
             hardware=follower,
             camera_hub=camera_hub,
             teleop=teleop,
@@ -230,6 +256,10 @@ def main(argv: list[str] | None = None) -> int:
             fps=args.fps,
             warmup_s=args.warmup,
             task=args.task,
+            home_tolerance_deg=args.home_tolerance,
+            home_exit_tolerance_deg=args.home_exit_tolerance,
+            visualizer=visualizer,
+            kinematics=kinematics,
         )
         stats = runner.run(max_episodes=args.max_episodes, max_seconds=args.duration)
     except SO101Error as exc:

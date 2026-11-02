@@ -31,6 +31,7 @@ from pathlib import Path
 from so101_collector.config import VisionConfig, default_config_dir
 from so101_collector.core.camera_hub import CameraHub, V4L2Camera
 from so101_collector.core.hardware_interface import SO101HardwareInterface
+from so101_collector.core.visualizer import NullVisualizer, RerunVisualizer, Visualizer
 from so101_collector.exceptions import CameraError, SO101Error
 from so101_collector.simulation import SimulatedCamera
 from so101_collector.timing import LoopTimer
@@ -70,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip the Feetech bus latency check")
     parser.add_argument("--snapshot-dir", type=Path, default=None,
                         help="save one PNG per camera for manual FOV inspection")
+    parser.add_argument("--rerun", action="store_true",
+                        help="stream live camera feeds and sync metrics to Rerun viewer")
+    parser.add_argument("--rerun-connect", default=None, metavar="ADDR",
+                        help="connect to an external running Rerun viewer (e.g. 127.0.0.1:9876)")
     parser.add_argument("--simulate", action="store_true",
                         help="use simulated cameras (no hardware)")
     parser.add_argument("--log-level", default="WARNING",
@@ -96,6 +101,7 @@ def _measure(
     window_s: float,
     fps: float,
     snapshot_dir: Path | None,
+    visualizer: Visualizer | None = None,
 ) -> tuple[dict[str, list[float]], list[float]]:
     """Return per-camera windowed FPS series and sync-dt samples (seconds)."""
     windows: dict[str, list[float]] = {name: [] for name in hub.names}
@@ -103,17 +109,37 @@ def _measure(
     last_counts: dict[str, int] = {name: 0 for name in hub.names}
     last_window_at = time.monotonic()
     snapshots = 0
+    step_idx = 0
     started = time.monotonic()
 
     timer = LoopTimer(fps)
     timer.start()
     try:
         while time.monotonic() - started < duration_s:
+            step_idx += 1
+            now = time.monotonic()
+            base_frame = None
+            wrist_frame = None
+            dt_sync_ms = None
             try:
                 base, wrist, dt_sync = hub.get_synced_frames()
                 sync_samples.append(dt_sync)
+                base_frame = base
+                wrist_frame = wrist
+                dt_sync_ms = dt_sync * 1000.0
             except CameraError as exc:
                 logger.warning("frame unavailable during check: %s", exc)
+
+            if visualizer is not None:
+                visualizer.log_step(
+                    session_time_s=now - started,
+                    step_index=step_idx,
+                    state="check",
+                    base_rgb=base_frame,
+                    wrist_rgb=wrist_frame,
+                    dt_sync_ms=dt_sync_ms,
+                )
+
             if snapshot_dir is not None and snapshots < 3:
                 try:
                     base, wrist, _ = hub.get_synced_frames()
@@ -124,7 +150,6 @@ def _measure(
                     _save_snapshot("wrist", wrist, snapshot_dir, snapshots)
                     snapshots += 1
 
-            now = time.monotonic()
             if now - last_window_at >= window_s:
                 stats = hub.stats()
                 elapsed = now - last_window_at
@@ -215,6 +240,15 @@ def main(argv: list[str] | None = None) -> int:
         vision = VisionConfig.from_yaml(camera_path)
         nominal_fps = min(camera.fps for camera in vision.cameras)
 
+        visualizer: Visualizer = NullVisualizer()
+        if args.rerun or args.rerun_connect:
+            visualizer = RerunVisualizer(
+                application_id="so101_check_cameras",
+                spawn=bool(args.rerun and not args.rerun_connect),
+                connect_addr=args.rerun_connect,
+            )
+            visualizer.start()
+
         hub = CameraHub(
             vision,
             sync_tolerance_ms=args.sync_threshold_ms,
@@ -223,14 +257,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Measuring for {args.duration:.0f}s "
               f"({', '.join(c.name for c in vision.cameras)})...")
         with hub:
-            windows, sync_samples = _measure(
-                hub,
-                duration_s=args.duration,
-                window_s=args.window,
-                fps=nominal_fps,
-                snapshot_dir=args.snapshot_dir,
-            )
-            hub_final = hub.stats()
+            try:
+                windows, sync_samples = _measure(
+                    hub,
+                    duration_s=args.duration,
+                    window_s=args.window,
+                    fps=nominal_fps,
+                    snapshot_dir=args.snapshot_dir,
+                    visualizer=visualizer,
+                )
+                hub_final = hub.stats()
+            finally:
+                visualizer.close()
     except SO101Error as exc:
         print(f"[FAIL] setup error: {exc}")
         return 1

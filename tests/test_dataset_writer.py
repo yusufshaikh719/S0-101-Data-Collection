@@ -299,3 +299,69 @@ def test_repo_id_must_be_plain_name(tmp_path):
     with pytest.raises(ValueError, match="repo_id"):
         DatasetWriter(tmp_path, "nested/name", encoder=OpenCVVideoEncoder(),
                       table_store=NpzTableStore())
+
+
+def test_official_lerobot_dataset_roundtrip_and_resume(tmp_path):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from so101_collector.core.lerobot_writer import LeRobotWriter
+
+    def open_writer():
+        return LeRobotWriter(tmp_path, "roundtrip", fps=30,
+                             image_shapes={"base": FRAME_SHAPE, "wrist": FRAME_SHAPE})
+
+    writer = open_writer()
+    for episode in range(2):
+        writer.start_episode("pick up the block")
+        for i in range(4):
+            writer.append(make_sample(episode * 4 + i))
+        writer.save_episode("pick up the block", success=False)
+    writer.close()
+
+    resumed = open_writer()
+    assert resumed.start_episode("pick up the block") == 2
+    for i in range(4):
+        resumed.append(make_sample(8 + i))
+    resumed.save_episode("pick up the block", success=False)
+    resumed.close()
+
+    dataset = LeRobotDataset("roundtrip", root=tmp_path / "roundtrip", video_backend="pyav")
+    assert dataset.num_episodes == 3
+    assert dataset.num_frames == 12
+    for i in (0, 3, 4, 8, 11):
+        row = dataset[i]
+        assert row["episode_index"].item() == i // 4
+        assert row["frame_index"].item() == i % 4
+        assert row["timestamp"].item() == pytest.approx((i % 4) / 30)
+        np.testing.assert_allclose(row["observation.state"].numpy(), np.full(6, i))
+        np.testing.assert_allclose(row["action"].numpy(), np.full(6, i + 0.5))
+        assert row["observation.images.base"].shape == (3, *FRAME_SHAPE)
+        assert row["observation.images.wrist"].shape == (3, *FRAME_SHAPE)
+
+
+def test_lerobot_worker_failure_is_reported_and_finalized(tmp_path):
+    from so101_collector.core.lerobot_writer import LeRobotWriter
+
+    class FailingDataset:
+        @classmethod
+        def create(cls, **kwargs):
+            instance = cls()
+            instance.meta = type("Meta", (), {"total_episodes": 0})()
+            instance.finalized = False
+            return instance
+
+        def add_frame(self, frame):
+            raise OSError("disk failed")
+
+        def finalize(self):
+            self.finalized = True
+
+    writer = LeRobotWriter(tmp_path, "failure", fps=30,
+                           image_shapes={"base": FRAME_SHAPE, "wrist": FRAME_SHAPE},
+                           dataset_class=FailingDataset)
+    writer.start_episode("task")
+    writer.append(make_sample())
+    with pytest.raises(DatasetWriteError, match="disk failed"):
+        writer.drain()
+    with pytest.raises(DatasetWriteError, match="disk failed"):
+        writer.close()
+    assert writer._dataset.finalized

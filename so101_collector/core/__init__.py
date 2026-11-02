@@ -16,6 +16,7 @@ from so101_collector.core.teleop_controller import (
     LeaderArmTeleop,
     TeleopSource,
 )
+from so101_collector.core.visualizer import NullVisualizer, RerunVisualizer, Visualizer
 
 __all__ = [
     "CameraHub",
@@ -28,10 +29,13 @@ __all__ = [
     "FrameSample",
     "JointState",
     "LeaderArmTeleop",
+    "NullVisualizer",
+    "RerunVisualizer",
     "RunnerState",
     "RunnerStats",
     "SO101HardwareInterface",
     "SO101Kinematics",
     "TeleopSource",
     "V4L2Camera",
+    "Visualizer",
 ]

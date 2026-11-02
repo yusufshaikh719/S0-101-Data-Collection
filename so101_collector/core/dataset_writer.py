@@ -271,7 +271,11 @@ class ParquetTableStore:
         except ImportError as exc:  # pragma: no cover - pandas is a hard dep
             raise DatasetWriteError("pandas is required for Parquet output") from exc
         path = Path(f"{stem}{self.suffix}")
-        frame = pd.DataFrame(dict(columns))
+        table_dict = {
+            name: (list(arr) if getattr(arr, "ndim", 1) == 2 else arr)
+            for name, arr in columns.items()
+        }
+        frame = pd.DataFrame(table_dict)
         try:
             frame.to_parquet(path, index=False)
         except ImportError as exc:
@@ -420,6 +424,10 @@ class DatasetWriter:
     @property
     def episode_active(self) -> bool:
         return self._episode_index is not None
+
+    @property
+    def active_episode_index(self) -> int | None:
+        return self._episode_index
 
     @property
     def next_episode_index(self) -> int:

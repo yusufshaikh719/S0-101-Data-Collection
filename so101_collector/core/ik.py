@@ -71,6 +71,56 @@ class SO101Kinematics:
             dtype=np.float64,
         )
 
+    def forward_chain(self, joints_deg: np.ndarray | list[float]) -> dict[str, np.ndarray]:
+        """Compute 3D position [x, y, z] (mm) for all joints in the chain:
+        'base', 'shoulder', 'elbow', 'wrist', 'tool'.
+        """
+        q = np.asarray(joints_deg, dtype=np.float64).reshape(-1)
+        if q.size < 5:
+            raise ValueError(f"expected at least 5 joint angles, got {q.size}")
+        cfg = self._cfg
+        pan, lift, elbow, wrist, _roll = q[:5]
+
+        plane_angle = math.radians(pan)
+        cos_plane = math.cos(plane_angle)
+        sin_plane = math.sin(plane_angle)
+
+        a_lift = math.radians(lift)
+        a_forearm = a_lift + math.radians(elbow)
+        a_tool = a_forearm + math.radians(wrist)
+
+        base = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        shoulder = np.array([0.0, 0.0, float(cfg.shoulder_height_mm)], dtype=np.float64)
+
+        u_elbow = cfg.upper_arm_mm * math.cos(a_lift)
+        w_elbow = cfg.upper_arm_mm * math.sin(a_lift)
+        elbow_pt = np.array(
+            [u_elbow * cos_plane, u_elbow * sin_plane, cfg.shoulder_height_mm + w_elbow],
+            dtype=np.float64,
+        )
+
+        u_wrist = u_elbow + cfg.forearm_mm * math.cos(a_forearm)
+        w_wrist = w_elbow + cfg.forearm_mm * math.sin(a_forearm)
+        wrist_pt = np.array(
+            [u_wrist * cos_plane, u_wrist * sin_plane, cfg.shoulder_height_mm + w_wrist],
+            dtype=np.float64,
+        )
+
+        u_tool = u_wrist + cfg.tool_length_mm * math.cos(a_tool)
+        w_tool = w_wrist + cfg.tool_length_mm * math.sin(a_tool)
+        tool_pt = np.array(
+            [u_tool * cos_plane, u_tool * sin_plane, cfg.shoulder_height_mm + w_tool],
+            dtype=np.float64,
+        )
+
+        return {
+            "base": base,
+            "shoulder": shoulder,
+            "elbow": elbow_pt,
+            "wrist": wrist_pt,
+            "tool": tool_pt,
+        }
+
     # -- inverse kinematics ------------------------------------------------
     def inverse(
         self,

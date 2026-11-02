@@ -7,13 +7,14 @@ name = "so101-collector"
 version = "0.1.0"
 description = "Production-grade multimodal data collection pipeline for SO-101 floor pick-and-place demonstrations"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.24",
     "pyserial>=3.5",
     "opencv-python>=4.8",
     "PyYAML>=6.0",
     "pandas>=2.0",
+    "lerobot[dataset]==0.6.1",
 ]
 
 [project.optional-dependencies]
@@ -21,11 +22,14 @@ dependencies = [
 video = ["av>=11.0"]
 # LeRobot-compatible Parquet tables (falls back to .npz without it).
 parquet = ["pyarrow>=14.0"]
+# Rerun multimodal live visualizer & logger.
+visualize = ["rerun-sdk>=0.18"]
 dev = [
     "pytest>=7.4",
     "ruff>=0.4",
     "av>=11.0",
     "pyarrow>=14.0",
+    "rerun-sdk>=0.18",
 ]
 
 [project.scripts]

@@ -34,7 +34,9 @@ from so101_collector.console import Command, CommandReader
 from so101_collector.core.camera_hub import CameraHub
 from so101_collector.core.dataset_writer import DatasetWriter, FrameSample
 from so101_collector.core.hardware_interface import SO101HardwareInterface
+from so101_collector.core.ik import SO101Kinematics
 from so101_collector.core.teleop_controller import TeleopSource
+from so101_collector.core.visualizer import NullVisualizer, Visualizer
 from so101_collector.exceptions import CameraError, DatasetWriteError, EpisodeStateError
 from so101_collector.timing import LoopTimer
 
@@ -96,6 +98,8 @@ class DataCollectionRunner:
         warmup_s: float = 2.0,
         task: str = DEFAULT_TASK,
         stats_log_interval_s: float = 5.0,
+        visualizer: Visualizer | None = None,
+        kinematics: SO101Kinematics | None = None,
     ) -> None:
         if warmup_s < 0:
             raise ValueError(f"warmup_s must be >= 0, got {warmup_s}")
@@ -111,6 +115,8 @@ class DataCollectionRunner:
         self._warmup_s = warmup_s
         self._task = task
         self._stats_log_interval_s = stats_log_interval_s
+        self._visualizer = visualizer if visualizer is not None else NullVisualizer()
+        self._kinematics = kinematics
 
     # -- public API --------------------------------------------------------
     def run(
@@ -119,6 +125,7 @@ class DataCollectionRunner:
         """Run the collection loop until QUIT/limits/Ctrl-C; returns stats."""
         stats = RunnerStats()
         started_at = time.monotonic()
+        step_index = 0
         last_action: np.ndarray | None = None
         last_dt = self._timer.target_dt
         state = RunnerState.IDLE
@@ -130,6 +137,8 @@ class DataCollectionRunner:
         self._camera_hub.start()
         self._teleop.open()
         self._timer.start()
+        self._visualizer.start()
+        self._visualizer.log_event("session_start", f"Task: {self._task}")
         logger.info(
             "session started (fps=%.0f, warmup=%.1fs, task=%r)",
             self._fps,
@@ -151,15 +160,18 @@ class DataCollectionRunner:
                 command = self._commands.read()
                 if command is Command.QUIT:
                     logger.info("quit requested")
+                    self._visualizer.log_event("command_quit", "Operator requested quit")
                     break
                 if command is Command.RESET:
                     self._hardware.go_home()
                     logger.info("reset: driving to home pose")
+                    self._visualizer.log_event("command_reset", "Driving to home pose")
                 elif command is Command.START:
                     if state is RunnerState.IDLE:
                         state = RunnerState.WARMUP
                         warmup_started_at = time.monotonic()
                         logger.info("episode warmup started (%.1f s)", self._warmup_s)
+                        self._visualizer.log_event("command_start", f"Warmup started ({self._warmup_s:.1f} s)")
                 elif command is Command.FINISH:
                     state = self._finish(state, stats)
                 elif command is Command.ABORT:
@@ -182,8 +194,10 @@ class DataCollectionRunner:
                         episode_index = self._writer.start_episode(self._task)
                         state = RunnerState.RECORDING
                         logger.info("recording episode %06d", episode_index)
+                        self._visualizer.log_event("episode_started", f"Recording episode {episode_index:06d}")
 
                 # -- acquisition tick (teleop drives the arm every state) -
+                step_index += 1
                 tick_started = time.monotonic()
                 measured = self._hardware.read_state()
                 action = self._teleop.read(last_dt)
@@ -196,10 +210,37 @@ class DataCollectionRunner:
                 applied = self._hardware.write_positions(action)
                 last_action = applied
 
+                base_frame: np.ndarray | None = None
+                wrist_frame: np.ndarray | None = None
+                dt_sync_ms: float | None = None
+
                 if state is RunnerState.RECORDING:
-                    state = self._capture(
+                    state, base_frame, wrist_frame, dt_sync_s = self._capture(
                         state, stats, tick_started, measured.positions, applied
                     )
+                    if dt_sync_s is not None:
+                        dt_sync_ms = dt_sync_s * 1000.0
+                else:
+                    try:
+                        base_frame = self._camera_hub.get_frame("base").frame
+                        wrist_frame = self._camera_hub.get_frame("wrist").frame
+                    except Exception:
+                        pass
+
+                self._visualizer.log_step(
+                    session_time_s=tick_started - started_at,
+                    step_index=step_index,
+                    state=state.value,
+                    measured_positions=measured.positions,
+                    applied_action=applied,
+                    base_rgb=base_frame,
+                    wrist_rgb=wrist_frame,
+                    dt_sync_ms=dt_sync_ms,
+                    loop_fps=self._timer.summary().mean_fps,
+                    episode_index=self._writer.active_episode_index,
+                    episode_frame_index=self._writer.frame_count if self._writer.episode_active else None,
+                    kinematics=self._kinematics,
+                )
 
                 # -- drift-compensated pacing ---------------------------
                 tick = self._timer.wait()
@@ -218,6 +259,7 @@ class DataCollectionRunner:
                 self._writer.discard_episode()
                 stats.episodes_discarded += 1
             self._timer.stop()
+            self._visualizer.close()
             timer_summary = self._timer.summary()
             stats.timer_ticks = timer_summary.ticks
             stats.timer_overruns = timer_summary.overruns
@@ -244,6 +286,7 @@ class DataCollectionRunner:
                 logger.error("save failed: %s", exc)
                 return state
             stats.episodes_saved += 1
+            self._visualizer.log_event("episode_saved", f"Episode {stats.episodes_saved} saved")
             return RunnerState.IDLE
         if state is RunnerState.WARMUP:
             logger.info("warmup cancelled")
@@ -255,6 +298,7 @@ class DataCollectionRunner:
         if state is RunnerState.RECORDING:
             self._writer.discard_episode()
             stats.episodes_discarded += 1
+            self._visualizer.log_event("episode_aborted", "Episode discarded")
         elif state is RunnerState.WARMUP:
             logger.info("warmup cancelled")
         else:
@@ -268,16 +312,17 @@ class DataCollectionRunner:
         tick_started: float,
         measured_positions: np.ndarray,
         applied_action: np.ndarray,
-    ) -> RunnerState:
+    ) -> tuple[RunnerState, np.ndarray | None, np.ndarray | None, float | None]:
         try:
-            base_frame, wrist_frame, _dt_sync = self._camera_hub.get_synced_frames()
+            base_frame, wrist_frame, dt_sync = self._camera_hub.get_synced_frames()
         except CameraError as exc:
             # Losing video mid-episode would desynchronize state from pixels;
             # drop the episode rather than write inconsistent training data.
             logger.error("camera failure mid-episode, discarding: %s", exc)
             self._writer.discard_episode()
+            self._visualizer.log_event("camera_error", str(exc))
             stats.episodes_discarded += 1
-            return RunnerState.IDLE
+            return RunnerState.IDLE, None, None, None
         self._writer.append(
             FrameSample(
                 timestamp=tick_started,
@@ -288,7 +333,7 @@ class DataCollectionRunner:
             )
         )
         stats.frames_recorded += 1
-        return state
+        return state, base_frame, wrist_frame, dt_sync
 
     def _log_progress(self) -> None:
         timer_summary = self._timer.summary()
