@@ -180,7 +180,7 @@ def test_synced_frames_returns_both_frames_and_small_dt():
 def test_sync_warning_fires_above_tolerance(caplog):
     warnings: list[float] = []
     hub = _hub_with_timestamps(100.0, 100.05, on_sync_warning=warnings.append)
-    with hub, caplog.at_level(logging.WARNING, logger="so101_collector.core.camera_hub"):
+    with hub, caplog.at_level(logging.DEBUG, logger="so101_collector.core.camera_hub"):
         _, _, dt_sync = _await_frames(hub)
         hub.get_synced_frames()
         hub.get_synced_frames()
@@ -195,7 +195,7 @@ def test_sync_warning_fires_above_tolerance(caplog):
 
 def test_synced_frames_below_tolerance_does_not_warn(caplog):
     hub = _hub_with_timestamps(100.0, 100.01)
-    with hub, caplog.at_level(logging.WARNING, logger="so101_collector.core.camera_hub"):
+    with hub, caplog.at_level(logging.DEBUG, logger="so101_collector.core.camera_hub"):
         _await_frames(hub)
         hub.get_synced_frames()
     assert not any("drift" in m for m in _messages(caplog))

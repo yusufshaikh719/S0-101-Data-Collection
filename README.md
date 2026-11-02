@@ -12,6 +12,9 @@ pip install -e ".[dev]"          # + pytest, ruff
 pip install -e ".[visualize]"    # + rerun-sdk
 ```
 
+For a step-by-step hand-off to another person or machine (Windows, macOS or
+Linux), see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+
 ## Usage
 
 ```bash
@@ -30,6 +33,9 @@ so101-calibrate --capture-home --write
 
 # Record with a 1:1 leader arm and a live Rerun viewer
 so101-record --teleop leader --repo-id floor_pick_session_01 --rerun
+
+# No leader arm: release the follower's torque and drag it by hand
+so101-record --teleop backdrive --repo-id floor_pick_session_01 --rerun
 
 # Run without a robot attached
 so101-record --simulate --duration 10
@@ -67,6 +73,25 @@ Calibrate `offset_deg` first (`so101-calibrate --capture min`), then run
 and write the mean into `home_deg`. The shipped values are placeholders; a pose
 outside the configured joint limits is rejected. `so101-setup --check` prints
 the per-joint distance from home so you can confirm detection fires.
+
+### Hand-guiding the follower (no leader arm)
+
+`--teleop backdrive` needs no leader arm: every follower servo is switched to
+free-spin so you can drag the arm through a demonstration, and the measured
+joint angles become the episode. The recorded action is the measured pose
+extrapolated one control period ahead (a next-pose target), so a policy trained
+on it reproduces the motion instead of learning to hold still.
+
+- About a second after the cameras start, torque is released and the arm falls
+  under gravity. Hold the wrist before that warning, and keep supporting the
+  arm while you move it.
+- R restores torque and ramps back to `home_deg` at `--backdrive-home-speed`
+  (45 deg/s default), then releases torque again once the tucked pose is
+  reached. It will not jump to home from an arbitrary pose.
+- Q, Ctrl-C or a crash restores torque holding whatever pose the arm is in, so
+  it does not collapse when the session ends.
+- The trajectory is only as smooth as your hand. Move slowly and deliberately;
+  at 30 FPS each sample advances at most a couple of degrees.
 
 For floor pickup, split a demonstration into pre-grasp alignment, descent and
 grasp with a short contact pause, then lift and hold. Vary object position
@@ -113,7 +138,8 @@ validation, home-pose splitting and an end-to-end session on the simulated rig.
 ## macOS
 
 The recording pipeline runs on macOS. Only SpaceMouse and gamepad input are
-Linux-only, so use the leader arm for teleoperation there.
+Linux-only, so use the leader arm or `--teleop backdrive` for teleoperation
+there.
 
 - Serial adapters appear as `/dev/cu.usbmodem*` or `/dev/cu.usbserial-*`.
   Those names embed the adapter's USB serial number and are accepted like a

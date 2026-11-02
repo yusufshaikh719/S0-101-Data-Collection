@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# SO-101 follower arm: Feetech STS3215 serial bus + joint calibration
+# ---------------------------------------------------------------------------
+# The port MUST be a persistent /dev/serial/by-id path so replugging the USB
+# adapter can never swap the follower and leader arms.
+# Find yours with:  ls -l /dev/serial/by-id/
+port: /dev/cu.usbmodem5B8E1137701
+baudrate: 1000000
+timeout_s: 0.05
+
+# Dropped-packet recovery: retry N times, then raise BusCommunicationError.
+max_retries: 3
+retry_backoff_s: 0.002
+
+# Only set true for bench testing with /dev/ttyUSB0-style paths.
+allow_dynamic_port: false
+
+# Set when using a 1:1 passive leader arm for teleoperation.
+leader_port: null
+# Per-joint leader->follower mounting offsets (degrees), same order as joints.
+leader_offset_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Analytical IK geometry. Floor plane is z = 0; the shoulder pivot sits
+# shoulder_height_mm above it. Measure on your arm before training runs.
+kinematics:
+  shoulder_height_mm: 118.0
+  upper_arm_mm: 117.0
+  forearm_mm: 135.0
+  tool_length_mm: 65.0
+  # Software floor stop: gripper tip halts 2 mm above the floor.
+  floor_clearance_mm: 2.0
+  reach_margin_mm: 1.0
+
+# Limits are enforced in software on every write (avoid floor collisions and
+# motor burnout). offset_deg shifts joint angles into the servo's 0..4095
+# encoder window (deg = ticks * 360/4096 + offset_deg); the -180.0 values
+# below assume each servo horn was mounted centered on joint zero - verify
+# every joint with `so101-calibrate --capture min home max --write` before
+# recording training data.
+joints:
+  - { name: shoulder_pan,  servo_id: 1, min_deg: -135.0, max_deg: 135.0, home_deg:   0.0, offset_deg: -180.0 }
+  - { name: shoulder_lift, servo_id: 2, min_deg:  -90.0, max_deg: 120.0, home_deg:  45.0, offset_deg: -180.0 }
+  - { name: elbow_flex,    servo_id: 3, min_deg: -135.0, max_deg: 135.0, home_deg: -60.0, offset_deg: -180.0 }
+  - { name: wrist_flex,    servo_id: 4, min_deg: -100.0, max_deg: 100.0, home_deg:  15.0, offset_deg: -180.0 }
+  - { name: wrist_roll,    servo_id: 5, min_deg: -160.0, max_deg: 160.0, home_deg:   0.0, offset_deg: -180.0 }
+  - { name: gripper,       servo_id: 6, min_deg:    0.0, max_deg:  60.0, home_deg:  60.0, offset_deg: -180.0 } # 0 = closed, 60 = open

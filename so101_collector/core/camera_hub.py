@@ -100,7 +100,8 @@ class V4L2Camera:
             ) from exc
         self._cv2 = cv2
 
-        backend = cv2.CAP_V4L2 if path.startswith("/dev/") else cv2.CAP_ANY
+        is_v4l2 = path.startswith("/dev/")
+        backend = cv2.CAP_V4L2 if is_v4l2 else cv2.CAP_ANY
         capture = cv2.VideoCapture(capture_source(path), backend)
         if not capture.isOpened():
             capture.release()
@@ -120,9 +121,11 @@ class V4L2Camera:
         for prop_name, value in settings:
             prop_id = getattr(cv2, prop_name)
             if not capture.set(prop_id, value):
-                logger.warning(
-                    "camera '%s': driver rejected %s=%s", self._config.name, prop_name, value
-                )
+                # AVFoundation (macOS camera indices) does not implement the
+                # V4L2-only properties; the defaults it keeps are usable, so
+                # this is only interesting on a real /dev/video* device.
+                log = logger.warning if is_v4l2 else logger.debug
+                log("camera '%s': driver rejected %s=%s", self._config.name, prop_name, value)
 
         if self._config.exposure is not None:
             # Lock exposure to stop auto-exposure from causing frame-rate
@@ -145,7 +148,7 @@ class V4L2Camera:
             int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             float(capture.get(cv2.CAP_PROP_FPS)),
         )
-        logger.info(
+        logger.debug(
             "camera '%s': opened %s (%dx%d @ %.1f FPS requested, %dx%d @ %.1f reported)",
             self._config.name,
             path,
@@ -369,6 +372,12 @@ class CameraHub:
         self._sync_sum_s = 0.0
         self._sync_max_s = 0.0
         self._sync_warnings = 0
+        # Two cameras with independent clocks sit at a steady offset, so the
+        # drift warning would repeat every tick. The 5 s status line carries
+        # the count; log the detail at most once per interval.
+        self._sync_warning_interval_s = 5.0
+        self._last_sync_warning = 0.0
+        self._reported_sync_warnings = 0
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -386,7 +395,7 @@ class CameraHub:
             worker = CameraWorker(config, self._source_factory(config))
             worker.start()
             self._workers[name] = worker
-        logger.info("camera hub started: %s", ", ".join(self._configs))
+        logger.debug("camera hub started: %s", ", ".join(self._configs))
         return self
 
     def stop(self) -> None:
@@ -434,17 +443,28 @@ class CameraHub:
         self._sync_max_s = max(self._sync_max_s, dt_sync)
         if dt_sync > self._tolerance_s:
             self._sync_warnings += 1
-            logger.warning(
-                "frame synchronization drift %.2f ms exceeds %.2f ms tolerance "
-                "(base seq=%d, wrist seq=%d)",
-                dt_sync * 1000.0,
-                self._tolerance_s * 1000.0,
-                base.sequence,
-                wrist.sequence,
-            )
+            self._warn_sync(dt_sync, base, wrist)
             if self._on_sync_warning is not None:
                 self._on_sync_warning(dt_sync)
         return base.frame, wrist.frame, dt_sync
+
+    def _warn_sync(self, dt_sync: float, base: FramePacket, wrist: FramePacket) -> None:
+        now = time.monotonic()
+        if now - self._last_sync_warning < self._sync_warning_interval_s:
+            return
+        suppressed = self._sync_warnings - self._reported_sync_warnings - 1
+        self._last_sync_warning = now
+        self._reported_sync_warnings = self._sync_warnings
+        extra = f"; {suppressed} more since the last warning" if suppressed > 0 else ""
+        logger.debug(
+            "frame synchronization drift %.2f ms exceeds %.2f ms tolerance "
+            "(base seq=%d, wrist seq=%d%s)",
+            dt_sync * 1000.0,
+            self._tolerance_s * 1000.0,
+            base.sequence,
+            wrist.sequence,
+            extra,
+        )
 
     # -- monitoring --------------------------------------------------------
     def stats(self) -> CameraHubStats:

@@ -332,7 +332,7 @@ class SO101HardwareInterface:
                 raise BusCommunicationError(
                     f"joint servo(s) not responding on {self._config.port}: {', '.join(missing)}"
                 )
-        logger.info(
+        logger.debug(
             "SO-101 bus open on %s @ %d baud (%d joints)",
             self._config.port,
             self._config.baudrate,
@@ -455,6 +455,24 @@ class SO101HardwareInterface:
                 Register.TORQUE_ENABLE,
                 bytes((1 if enabled else 0,)),
             )
+
+    def read_torque(self) -> np.ndarray:
+        """Per-joint torque-enable state read back from the servos.
+
+        Used to confirm a torque release actually took effect: a joint that
+        still reports enabled will fight a hand-guided drag.
+        """
+        states = np.empty(len(self._config.joints), dtype=bool)
+        for index, joint in enumerate(self._config.joints):
+            raw = self._robust(
+                f"read(torque, {joint.name})",
+                self._bus.read,
+                joint.servo_id,
+                Register.TORQUE_ENABLE,
+                1,
+            )
+            states[index] = bool(raw[0])
+        return states
 
     def read_raw_ticks(self) -> np.ndarray:
         """Raw encoder ticks for all joints (calibration helper)."""

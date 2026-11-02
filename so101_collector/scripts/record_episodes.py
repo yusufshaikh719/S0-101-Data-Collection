@@ -2,6 +2,9 @@
 
     so101-record --teleop leader --repo-id floor_pick_session_01
 
+    # No leader arm: release torque and drag the follower by hand
+    so101-record --teleop backdrive --repo-id floor_pick_session_01
+
     # SpaceMouse and gamepad commands
     so101-record --teleop spacenav \\
         --spacenav-device /dev/input/by-id/usb-3Dconnexion_SpaceMouse-event-if00 \\
@@ -20,6 +23,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
 import time
 from dataclasses import replace
@@ -44,6 +48,7 @@ from so101_collector.core.hardware_interface import SO101HardwareInterface
 from so101_collector.core.ik import SO101Kinematics
 from so101_collector.core.lerobot_writer import LeRobotWriter
 from so101_collector.core.teleop_controller import (
+    BackdriveTeleop,
     CartesianTeleop,
     LeaderArmTeleop,
     TeleopSource,
@@ -82,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     rig = parser.add_argument_group("rig")
     rig.add_argument(
         "--teleop",
-        choices=("leader", "spacenav", "simulated", "static"),
+        choices=("leader", "backdrive", "spacenav", "simulated", "static"),
         default=None,
         help="teleoperation backend (default: leader, or simulated with --simulate)",
     )
@@ -98,6 +103,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="persistent evdev path for gamepad trigger commands")
     rig.add_argument("--simulate", action="store_true",
                      help="run with simulated hardware/cameras (no robot attached)")
+    rig.add_argument(
+        "--backdrive-home-speed",
+        type=float,
+        default=45.0,
+        metavar="DEG_S",
+        help="torque-restored homing rate for --teleop backdrive",
+    )
 
     loop = parser.add_argument_group("loop")
     loop.add_argument("--fps", type=int, default=30, help="control loop frequency")
@@ -158,6 +170,13 @@ def _build_teleop(
 
     if mode == "simulated":
         return ScriptedTeleop(robot)
+
+    if mode == "backdrive":
+        return BackdriveTeleop(
+            follower,
+            home_speed_deg_s=args.backdrive_home_speed,
+            home_tolerance_deg=args.home_tolerance,
+        )
 
     if mode == "leader":
         if args.leader_config:
@@ -221,15 +240,27 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-
+    # LeRobot dumps a multi-page libtorchcodec traceback on every run when its
+    # FFmpeg linkage does not match, then successfully falls back to pyav. The
+    # fallback is expected here; the traceback hides the warnings that matter.
+    logging.getLogger("lerobot.utils.import_utils").setLevel(logging.ERROR)
+    # Startup chatter that tells an operator nothing they can act on.
+    for name in ("lerobot.configs.video", "re_grpc_server", "re_perf_telemetry"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    # SVT-AV1 prints a ~46 line banner for every saved episode. The encoder is
+    # unchanged; only its info logging is muted (respects an existing value).
+    os.environ.setdefault("SVT_LOG", "0")
     try:
         robot, vision = _load_configs(args)
         if (args.fps <= 0 or args.warmup < 0 or not math.isfinite(args.warmup)
                 or not math.isfinite(args.home_tolerance) or args.home_tolerance <= 0
                 or not math.isfinite(args.home_exit_tolerance)
-                or args.home_exit_tolerance <= args.home_tolerance):
-            raise ConfigError("fps must be positive, warmup nonnegative, and home exit tolerance "
-                              "must exceed a positive home tolerance")
+                or args.home_exit_tolerance <= args.home_tolerance
+                or not math.isfinite(args.backdrive_home_speed)
+                or args.backdrive_home_speed <= 0):
+            raise ConfigError("fps must be positive, warmup nonnegative, home exit tolerance "
+                              "must exceed a positive home tolerance, and the backdrive "
+                              "homing speed must be positive")
         for name in ("base", "wrist"):
             if vision.by_name[name].fps != args.fps:
                 raise ConfigError(f"camera {name} fps must match the recording fps ({args.fps})")

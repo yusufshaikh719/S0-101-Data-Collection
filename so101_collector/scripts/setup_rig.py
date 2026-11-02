@@ -412,7 +412,7 @@ def check_leader(robot: RobotConfig) -> CheckResult:
             "leader arm",
             "WARN",
             "leader_port is unset: --teleop leader will refuse to start "
-            "(set it, or use --teleop spacenav)",
+            "(set it, or use --teleop backdrive / spacenav)",
         )
     interface = SO101HardwareInterface(replace(robot, port=robot.leader_port))
     try:

@@ -77,7 +77,8 @@ class TimerSummary:
 class LoopTimer:
     """Loop timer with overrun accounting.
 
-    Overruns are always counted; those above 5 ms are also logged. Pass
+    Overruns are always counted; those above 5 ms are also logged, at most once
+    per 5 s (the runner's status line reports the running total). Pass
     ``overrun_warn_threshold_s=0`` to log every overrun.
     """
 
@@ -121,6 +122,9 @@ class LoopTimer:
         self._max_overrun = 0.0
         self._max_jitter = 0.0
         self._sum_period = 0.0
+        self._overrun_log_interval_s = 5.0
+        self._last_overrun_log = 0.0
+        self._suppressed_overrun_logs = 0
 
     @property
     def target_dt(self) -> float:
@@ -181,7 +185,7 @@ class LoopTimer:
         self._adapt_spin_margin(overrun)
 
         if overrun >= self._warn_threshold:
-            logger.warning("Frame overrun by %.2f ms", overrun * 1000.0)
+            self._log_overrun(overrun)
 
         self._ticks += 1
         self._sum_period += period
@@ -201,6 +205,18 @@ class LoopTimer:
             self._next_tick = end + self._target_dt
         self._last_tick_end = end
         return TickStats(period_s=period, overrun_s=overrun)
+
+    def _log_overrun(self, overrun: float) -> None:
+        """Warn about lateness at most once per interval, keeping a count."""
+        now = self._clock()
+        if now - self._last_overrun_log < self._overrun_log_interval_s:
+            self._suppressed_overrun_logs += 1
+            return
+        suppressed = self._suppressed_overrun_logs
+        self._suppressed_overrun_logs = 0
+        self._last_overrun_log = now
+        suffix = f" ({suppressed} more since the last warning)" if suppressed else ""
+        logger.debug("Frame overrun by %.2f ms%s", overrun * 1000.0, suffix)
 
     def _wait_until(self, scheduled: float) -> float:
         """Sleep coarsely to ``scheduled - spin_margin``, then spin precisely.

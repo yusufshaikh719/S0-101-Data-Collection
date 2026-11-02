@@ -41,6 +41,7 @@ class SimulatedBus:
             for joint in config.joints
         }
         self._goals: dict[int, float] = dict(self._positions)
+        self._torque: dict[int, bool] = {j.servo_id: True for j in config.joints}
         self._open = False
         self._fail_count = 0
         self._lock = threading.Lock()
@@ -69,10 +70,31 @@ class SimulatedBus:
             self._fail_count -= 1
             raise BusCommunicationError(f"simulated transient failure during {label}")
 
+    def manual_move(self, degrees: Sequence[float]) -> None:
+        """Simulate a hand dragging the arm: shift present positions.
+
+        ``degrees`` are joint deltas in config joint order. Torque must be
+        released (``--teleop backdrive``) - otherwise the servo would fight
+        back, just like on hardware.
+        """
+        if len(degrees) != len(self._config.joints):
+            raise ValueError(
+                f"expected {len(self._config.joints)} joint deltas, got {len(degrees)}"
+            )
+        with self._lock:
+            for joint, delta in zip(self._config.joints, degrees, strict=True):
+                self._positions[joint.servo_id] += float(delta) / DEG_PER_TICK
+
+    def torque_enabled(self, servo_id: int) -> bool:
+        """True while the servo holds its goal position."""
+        return self._torque[servo_id]
+
     def _step_towards_goals(self) -> None:
         """Move present positions a bounded step towards their goals."""
         step = max(1.0, self._settle_speed * 0.033)  # one control tick worth
         for servo_id, goal in self._goals.items():
+            if not self._torque[servo_id]:  # free-spinning: only a hand moves it
+                continue
             current = self._positions[servo_id]
             delta = goal - current
             if delta == 0.0:
@@ -98,6 +120,8 @@ class SimulatedBus:
                 return struct.pack("<HHH", position, speed, load)
             if address == _REG_PRESENT_POSITION and length == 2:
                 return struct.pack("<H", int(round(self._positions[device_id])) & 0xFFFF)
+            if address == _REG_TORQUE and length == 1:
+                return bytes((1 if self._torque[device_id] else 0,))
         raise BusCommunicationError(
             f"simulated bus: unsupported read at address {address} len {length}"
         )
@@ -108,6 +132,9 @@ class SimulatedBus:
         if address == _REG_GOAL_POSITION and len(data) == 2:
             with self._lock:
                 self._goals[device_id] = float(struct.unpack("<H", data)[0])
+        elif address == _REG_TORQUE and len(data) == 1:
+            with self._lock:
+                self._torque[device_id] = bool(data[0])
         return _ok_status(device_id)
 
     def sync_write(self, address: int, items: Sequence[tuple[int, bytes]]) -> None:

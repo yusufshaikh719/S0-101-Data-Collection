@@ -25,7 +25,10 @@ def test_shipped_robot_config_loads():
     assert config.baudrate == 1_000_000
     assert config.timeout_s == pytest.approx(0.05)
     assert config.max_retries == 3
-    assert config.port.startswith("/dev/serial/by-id/")
+    # Persistent identifier: Linux by-id/by-path, macOS /dev/cu.<usb serial>.
+    assert config.port.startswith(
+        ("/dev/serial/by-id/", "/dev/serial/by-path/", "/dev/cu.")
+    )
     assert config.kinematics.floor_clearance_mm == pytest.approx(2.0)
     assert len(config.home_pose) == 6
 
@@ -38,7 +41,10 @@ def test_shipped_camera_config_loads():
         assert camera.width == 640 and camera.height == 480
         assert camera.fps == pytest.approx(30.0)
         assert camera.fourcc == "MJPG"
-        assert camera.device_path.startswith("/dev/v4l/by-id/")
+        # Linux pins /dev/v4l/by-id/..., macOS uses a numeric AVFoundation index.
+        assert camera.device_path.startswith(
+            ("/dev/v4l/by-id/", "/dev/v4l/by-path/")
+        ) or camera.device_path.isdigit()
         assert camera.frame_shape == (480, 640)
 
 

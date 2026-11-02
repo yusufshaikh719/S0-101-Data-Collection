@@ -11,6 +11,7 @@ import numpy as np
 
 from so101_collector.console import Command
 from so101_collector.core.lerobot_writer import FrameSample
+from so101_collector.core.teleop_controller import request_home
 from so101_collector.core.visualizer import NullVisualizer
 from so101_collector.exceptions import CameraError
 from so101_collector.timing import LoopTimer
@@ -105,12 +106,12 @@ class ContinuousDataCollectionRunner:
             raise ValueError("configured home pose contains non-finite values")
         armed = False
         has_sample = False
-        capture_start = None
+        last_report_frames = 0
         last_action = None
         last_dt = self._timer.target_dt
         state = RunnerState.WARMUP
         last_camera_warning = 0.0
-        last_home_hint = 0.0
+        home_hint_shown = False
         last_report = started
         reset_active = False
         failure = False
@@ -136,8 +137,13 @@ class ContinuousDataCollectionRunner:
                 if command is Command.QUIT:
                     break
                 if command is Command.RESET:
-                    reset_active = True
-                    self._visualizer.log_event("command_reset", "Driving to home pose")
+                    if request_home(self._teleop):
+                        # The source owns homing: with torque released it has to
+                        # power the arm up before anything can move.
+                        self._visualizer.log_event("command_reset", "Homing under power")
+                    else:
+                        reset_active = True
+                        self._visualizer.log_event("command_reset", "Driving to home pose")
                 elif command is Command.ABORT and self._writer.episode_active:
                     self._writer.discard_episode()
                     stats.episodes_discarded += 1
@@ -164,7 +170,13 @@ class ContinuousDataCollectionRunner:
                         reset_active = False
                 if action is None:
                     action = last_action if last_action is not None else home
-                applied = self._hardware.write_positions(action)
+                if getattr(self._teleop, "writes_targets", True):
+                    applied = self._hardware.write_positions(action)
+                else:
+                    # The source owns the servos (torque released): writing a
+                    # goal here can re-engage the position loop on some
+                    # firmware and make the arm fight the operator.
+                    applied = np.asarray(action, dtype=np.float32)
                 last_action = applied
                 base = wrist = None
                 dt_sync_ms = None
@@ -193,13 +205,14 @@ class ContinuousDataCollectionRunner:
                             # home, so they cannot begin with idle frames.
                             index = self._writer.start_episode(self._task)
                             logger.info("arm left the home pose; recording episode %06d", index)
+                            home_hint_shown = False
                             self._visualizer.log_event(
                                 "episode_started", f"Recording episode {index:06d}"
                             )
                         if not self._writer.episode_active:
                             state = RunnerState.IDLE
-                            if tick_started - last_home_hint >= 15.0:
-                                last_home_hint = tick_started
+                            if not home_hint_shown:
+                                home_hint_shown = True
                                 logger.info(
                                     "parked at the home pose (max joint error %.1f deg); "
                                     "recording starts once a joint leaves it by > %.1f deg",
@@ -212,9 +225,7 @@ class ContinuousDataCollectionRunner:
                                 FrameSample(tick_started, measured.positions, applied, base, wrist)
                             )
                             stats.frames_recorded += 1
-                            if not has_sample:
-                                capture_start = tick_started
-                                has_sample = True
+                            has_sample = True
                             dt_sync_ms = dt_sync * 1000.0
                             if armed and np.all(error <= self._enter):
                                 self._writer.save_episode(self._task, success=False)
@@ -245,14 +256,16 @@ class ContinuousDataCollectionRunner:
                 stats.timer_ticks += 1
                 last_dt = tick.period_s
                 if tick_started - last_report >= 5.0:
-                    last_report = tick_started
-                    summary = self._timer.summary()
+                    elapsed_report = tick_started - last_report
+                    # Interval rate: a cumulative average decays while the arm is
+                    # parked at home and looks like a throughput collapse.
                     capture_fps = (
-                        (stats.frames_recorded - 1) / (tick_started - capture_start)
-                        if capture_start is not None and tick_started > capture_start
-                        else 0
-                    )
-                    logger.info(
+                        stats.frames_recorded - last_report_frames
+                    ) / elapsed_report
+                    last_report = tick_started
+                    last_report_frames = stats.frames_recorded
+                    summary = self._timer.summary()
+                    logger.debug(
                         "capture %.1f fps | loop %.1f fps | overruns %d/%d | writer queue %d/%d",
                         capture_fps,
                         summary.mean_fps,
@@ -297,5 +310,5 @@ class ContinuousDataCollectionRunner:
                     self._teleop.close()
                     self._hardware.close()
                     self._commands.close()
-            logger.info("session finished\n%s", stats.summary())
+            logger.info("session finished")
         return stats
