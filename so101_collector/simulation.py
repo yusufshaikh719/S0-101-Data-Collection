@@ -1,18 +1,7 @@
-"""Simulated hardware, cameras, and teleoperation for ``--simulate`` and tests.
+"""Simulated bus, cameras and teleoperation for ``--simulate`` and tests.
 
-Lets the entire pipeline run end-to-end on a machine with no robot
-attached (CI smoke tests, demos, dataset-layout verification):
-
-* :class:`SimulatedBus` - in-memory Feetech register model implementing the
-  same transport API as
-  :class:`~so101_collector.core.hardware_interface.FeetechBus`.
-* :class:`SimulatedCamera` - paced synthetic RGB frames at the configured
-  FPS with deterministic content (frame index + gradient).
-* :class:`ScriptedTeleop` - smooth joint-space trajectory generator
-  (sinusoids around the home pose) with optional "press-to-move" gating.
-
-``SimulatedBus.fail_next(n)`` and ``SimulatedCamera.fail_next(n)`` let tests
-and demos exercise the retry/recovery paths without hardware.
+``SimulatedBus.fail_next()`` and ``SimulatedCamera.fail_next()`` inject
+transient failures so retry paths can be exercised without hardware.
 """
 
 from __future__ import annotations
@@ -21,21 +10,17 @@ import math
 import struct
 import threading
 import time
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
-from so101_collector.config import CameraConfig, JOINT_NAMES, RobotConfig
+from so101_collector.config import JOINT_NAMES, CameraConfig, RobotConfig
 from so101_collector.core.hardware_interface import (
     DEG_PER_TICK,
-    TICKS_PER_REV,
-    Instruction,
     StatusPacket,
     degrees_to_ticks,
-    signed_magnitude,
 )
 from so101_collector.exceptions import BusCommunicationError, CameraError
-from so101_collector.devices import CartCommand
 
 # Registers mirrored by SimulatedBus (subset used by the interface).
 _REG_TORQUE = 40
@@ -232,11 +217,7 @@ class SimulatedCamera:
 
 
 class ScriptedTeleop:
-    """Smooth sinusoidal joint trajectory around the home pose.
-
-    ``gated=True`` only moves while :meth:`press` is held (mimics a
-    SpaceMouse button in demos); otherwise it always moves.
-    """
+    """Sinusoidal joint trajectory around the home pose."""
 
     def __init__(
         self,
@@ -244,23 +225,13 @@ class ScriptedTeleop:
         *,
         amplitude_deg: float = 20.0,
         period_s: float = 6.0,
-        gated: bool = False,
         clock=time.monotonic,
     ) -> None:
         self._config = config
         self._amplitude = float(amplitude_deg)
         self._period = float(period_s)
-        self._gated = gated
         self._clock = clock
-        self._pressed = not gated
         self._t0: float | None = None
-
-    def press(self) -> None:
-        """Start moving (for gated demos keyed to the START command)."""
-        self._pressed = True
-
-    def release(self) -> None:
-        self._pressed = False
 
     def open(self) -> None:
         self._t0 = self._clock()
@@ -275,13 +246,10 @@ class ScriptedTeleop:
         elapsed = self._clock() - self._t0
         home = np.asarray(self._config.home_pose, dtype=np.float64)
         action = home.copy()
-        if self._pressed:
-            phase = 2.0 * math.pi * elapsed / self._period
-            for index in range(len(JOINT_NAMES) - 1):  # gripper stays put
-                scale = 0.4 + 0.15 * index
-                action[index] += self._amplitude * scale * math.sin(
-                    phase + index * math.pi / 5.0
-                )
+        phase = 2.0 * math.pi * elapsed / self._period
+        for index in range(len(JOINT_NAMES) - 1):  # gripper stays put
+            scale = 0.4 + 0.15 * index
+            action[index] += self._amplitude * scale * math.sin(phase + index * math.pi / 5.0)
         return action.astype(np.float32)
 
 
@@ -302,27 +270,9 @@ class StaticTeleop:
         return self._home.copy()
 
 
-class ZeroCartDevice:
-    """A motionless 6-DOF device (always returns a zero CartCommand)."""
-
-    def open(self) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
-
-    def poll(self) -> CartCommand:
-        return CartCommand()
-
-
-# Re-exported for convenience in scripts/tests.
 __all__ = [
     "ScriptedTeleop",
     "SimulatedBus",
     "SimulatedCamera",
     "StaticTeleop",
-    "ZeroCartDevice",
-    "signed_magnitude",
-    "Instruction",
-    "TICKS_PER_REV",
 ]

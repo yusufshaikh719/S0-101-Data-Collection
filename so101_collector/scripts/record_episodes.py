@@ -1,21 +1,18 @@
-"""Main CLI entry point: record demonstration episodes.
+"""Record demonstration episodes.
 
-Examples::
-
-    # Real hardware, leader-arm teleoperation, keyboard commands
     so101-record --teleop leader --repo-id floor_pick_session_01
 
-    # SpaceMouse + gamepad trigger commands
+    # SpaceMouse and gamepad commands
     so101-record --teleop spacenav \\
-        --spacenouse-device /dev/input/by-id/usb-3Dconnexion_SpaceMouse-event-if00 \\
+        --spacenav-device /dev/input/by-id/usb-3Dconnexion_SpaceMouse-event-if00 \\
         --gamepad-device /dev/input/by-id/usb-Logitech_F310-event-if00
 
-    # Full pipeline on a machine with no robot attached (smoke test)
+    # No robot attached
     so101-record --simulate --max-episodes 2 --duration 60
 
-Recording starts automatically once cameras are ready. A measured return to
-the configured home pose splits the episode. Enter splits manually; Escape
-discards the current episode; Q saves the final partial episode and quits.
+Recording starts once the cameras are ready and an episode ends when the arm
+returns to its home pose. Enter splits manually, Escape discards, Q saves the
+partial episode and quits.
 """
 
 from __future__ import annotations
@@ -42,11 +39,10 @@ from so101_collector.console import (
     TimedCommandReader,
 )
 from so101_collector.core.camera_hub import CameraHub, V4L2Camera
-from so101_collector.core.continuous_runner import ContinuousDataCollectionRunner
-from so101_collector.core.lerobot_writer import LeRobotWriter
+from so101_collector.core.continuous_runner import DEFAULT_TASK, ContinuousDataCollectionRunner
 from so101_collector.core.hardware_interface import SO101HardwareInterface
 from so101_collector.core.ik import SO101Kinematics
-from so101_collector.core.runner import DEFAULT_TASK
+from so101_collector.core.lerobot_writer import LeRobotWriter
 from so101_collector.core.teleop_controller import (
     CartesianTeleop,
     LeaderArmTeleop,
@@ -70,19 +66,33 @@ def build_parser() -> argparse.ArgumentParser:
     configs = parser.add_argument_group("configuration")
     configs.add_argument("--config-dir", type=Path, default=None,
                          help="directory containing robot_config.yaml and camera_config.yaml")
-    configs.add_argument("--robot-config", type=Path, default=None, help="path to robot_config.yaml")
-    configs.add_argument("--camera-config", type=Path, default=None, help="path to camera_config.yaml")
-    configs.add_argument("--output-dir", type=Path, default=Path("data"), help="dataset root directory")
+    configs.add_argument(
+        "--robot-config", type=Path, default=None, help="path to robot_config.yaml"
+    )
+    configs.add_argument(
+        "--camera-config", type=Path, default=None, help="path to camera_config.yaml"
+    )
+    configs.add_argument(
+        "--output-dir", type=Path, default=Path("data"), help="dataset root directory"
+    )
     configs.add_argument("--repo-id", default=None,
                          help="dataset folder name (default: so101_floor_pick_<timestamp>)")
     configs.add_argument("--task", default=DEFAULT_TASK, help="task description stored per episode")
 
     rig = parser.add_argument_group("rig")
-    rig.add_argument("--teleop", choices=("leader", "spacenav", "simulated", "static"),
-                     default=None, help="teleoperation backend (default: leader, or simulated with --simulate)")
-    rig.add_argument("--leader-config", type=Path, default=None,
-                     help="separate YAML for the leader arm (otherwise robot config's leader_port is used)")
-    rig.add_argument("--spacenouse-device", default=None,
+    rig.add_argument(
+        "--teleop",
+        choices=("leader", "spacenav", "simulated", "static"),
+        default=None,
+        help="teleoperation backend (default: leader, or simulated with --simulate)",
+    )
+    rig.add_argument(
+        "--leader-config",
+        type=Path,
+        default=None,
+        help="separate YAML for the leader arm (otherwise robot config's leader_port is used)",
+    )
+    rig.add_argument("--spacenav-device", default=None,
                      help="persistent evdev path of the SpaceMouse (/dev/input/by-id/...)")
     rig.add_argument("--gamepad-device", default=None,
                      help="persistent evdev path for gamepad trigger commands")
@@ -91,13 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     loop = parser.add_argument_group("loop")
     loop.add_argument("--fps", type=int, default=30, help="control loop frequency")
-    loop.add_argument("--warmup", type=float, default=0.0, help="optional camera warmup before recording")
+    loop.add_argument(
+        "--warmup", type=float, default=0.0, help="optional camera warmup before recording"
+    )
     loop.add_argument("--home-tolerance", type=float, default=5.0, metavar="DEGREES",
                       help="maximum per-joint error for detecting home")
     loop.add_argument("--home-exit-tolerance", type=float, default=8.0, metavar="DEGREES",
                       help="joint error needed to re-arm home detection")
     loop.add_argument("--duration", type=float, default=None, help="stop after this many seconds")
-    loop.add_argument("--max-episodes", type=int, default=None, help="stop after N completed episodes")
+    loop.add_argument(
+        "--max-episodes", type=int, default=None, help="stop after N completed episodes"
+    )
     loop.add_argument("--auto", type=float, default=None, metavar="SECONDS",
                       help="headless auto-pilot: save each episode after SECONDS of "
                            "recording (for CI/smoke runs; ignores the keyboard)")
@@ -163,12 +177,12 @@ def _build_teleop(
         return LeaderArmTeleop(leader_interface, leader_robot.leader_offset_deg)
 
     if mode == "spacenav":
-        if not args.spacenouse_device:
+        if not args.spacenav_device:
             raise ConfigError(
-                "--teleop spacenav requires --spacenouse-device "
+                "--teleop spacenav requires --spacenav-device "
                 "(a persistent /dev/input/by-id path)"
             )
-        device = SpaceMouseSource(args.spacenouse_device)
+        device = SpaceMouseSource(args.spacenav_device)
         kinematics = SO101Kinematics(robot.kinematics)
         return CartesianTeleop(
             kinematics,
@@ -185,8 +199,8 @@ def _build_commands(args: argparse.Namespace) -> CommandReader:
         if args.auto <= 0:
             raise ConfigError(f"--auto must be > 0, got {args.auto}")
         logger.info("auto-pilot: finishing each episode after %.1f s of recording", args.auto)
-        # START is pressed first, then warmup elapses, then recording runs;
-        # shift the timer so --auto counts pure recording time.
+        # Warmup happens before the first frame, so add it to keep --auto
+        # counting only recorded time.
         return TimedCommandReader(args.auto + args.warmup)
     readers: list[CommandReader] = [KeyboardCommandReader()]
     if args.gamepad_device:

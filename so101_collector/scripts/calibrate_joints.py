@@ -1,26 +1,15 @@
-"""Joint offset and range calibration helper.
+"""Joint offset and range calibration.
 
-Feetech servos report raw encoder ticks (0..4095 = 360 deg); the pipeline
-converts them to degrees with a per-joint ``offset_deg``.  This tool measures
-those offsets against known mechanical reference points.
+Feetech servos report raw encoder ticks (0..4095 for one revolution); the
+pipeline converts them to degrees using a per-joint ``offset_deg``.
 
-Modes::
+    so101-calibrate --show                          # current ticks and degrees
+    so101-calibrate --capture min home max          # guided capture
+    so101-calibrate --capture min --write            # capture and save
+    so101-calibrate --set shoulder_lift=-3.5        # direct value
 
-    # Read-only overview of ticks, derived degrees, and configured limits
-    so101-calibrate --show
-
-    # Interactive capture: move each joint to its min/home/max stop by hand
-    # (torque is disabled during capture so joints move freely)
-    so101-calibrate --capture min home max
-
-    # Same, then persist the new offsets into robot_config.yaml
-    so101-calibrate --capture min --write
-
-    # Direct value without interaction
-    so101-calibrate --set shoulder_lift=-3.5
-
-Safety: after interactive capture torque is re-enabled so the arm holds its
-position instead of collapsing under gravity.
+Torque is disabled during capture so the joints move freely, then re-enabled
+so the arm holds its position.
 """
 
 from __future__ import annotations

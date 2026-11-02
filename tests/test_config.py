@@ -43,7 +43,7 @@ def test_shipped_camera_config_loads():
 
 
 # ---------------------------------------------------------------------------
-# Zero index-drift policy
+# Device path policy
 # ---------------------------------------------------------------------------
 def test_dynamic_serial_port_rejected():
     with pytest.raises(ConfigError, match="dynamic device path"):

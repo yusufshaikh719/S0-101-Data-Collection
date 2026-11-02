@@ -4,31 +4,82 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
 from so101_collector.console import Command
-from so101_collector.core.dataset_writer import FrameSample
-from so101_collector.core.runner import DEFAULT_TASK, RunnerState, RunnerStats
+from so101_collector.core.lerobot_writer import FrameSample
 from so101_collector.core.visualizer import NullVisualizer
 from so101_collector.exceptions import CameraError
 from so101_collector.timing import LoopTimer
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TASK = "pick up the object from the floor and hold it in the air"
+
+
+class RunnerState(Enum):
+    IDLE = "idle"
+    WARMUP = "warmup"
+    RECORDING = "recording"
+
+
+@dataclass
+class RunnerStats:
+    """Session outcome returned by the runner."""
+
+    episodes_saved: int = 0
+    episodes_discarded: int = 0
+    frames_recorded: int = 0
+    duration_s: float = 0.0
+    final_state: str = RunnerState.IDLE.value
+    interrupted: bool = False
+    timer_ticks: int = 0
+    timer_overruns: int = 0
+    mean_loop_fps: float = 0.0
+    max_sync_drift_ms: float = 0.0
+
+    def summary(self) -> str:
+        return (
+            f"episodes saved: {self.episodes_saved}  "
+            f"discarded: {self.episodes_discarded}  "
+            f"frames: {self.frames_recorded}\n"
+            f"duration: {self.duration_s:.1f} s  loop: {self.mean_loop_fps:.1f} fps  "
+            f"overruns: {self.timer_overruns}/{self.timer_ticks}  "
+            f"max sync drift: {self.max_sync_drift_ms:.1f} ms"
+        )
+
 
 class ContinuousDataCollectionRunner:
-    """Capture every tick; save on return to the calibrated six-joint home pose."""
+    """Captures every tick and saves an episode when the arm returns home."""
 
     def __init__(
-        self, *, hardware, camera_hub, teleop, writer, commands, fps: int = 30,
-        warmup_s: float = 0.0, task: str = DEFAULT_TASK,
-        home_tolerance_deg: float = 5.0, home_exit_tolerance_deg: float = 8.0,
-        visualizer=None, kinematics=None, timer=None,
+        self,
+        *,
+        hardware,
+        camera_hub,
+        teleop,
+        writer,
+        commands,
+        fps: int = 30,
+        warmup_s: float = 0.0,
+        task: str = DEFAULT_TASK,
+        home_tolerance_deg: float = 5.0,
+        home_exit_tolerance_deg: float = 8.0,
+        visualizer=None,
+        kinematics=None,
+        timer=None,
     ) -> None:
-        if (fps <= 0 or warmup_s < 0 or not np.isfinite(home_tolerance_deg)
-                or not np.isfinite(home_exit_tolerance_deg)
-                or home_tolerance_deg <= 0 or home_exit_tolerance_deg <= home_tolerance_deg):
+        if (
+            fps <= 0
+            or warmup_s < 0
+            or not np.isfinite(home_tolerance_deg)
+            or not np.isfinite(home_exit_tolerance_deg)
+            or home_tolerance_deg <= 0
+            or home_exit_tolerance_deg <= home_tolerance_deg
+        ):
             raise ValueError("home exit tolerance must exceed a positive home tolerance")
         self._hardware = hardware
         self._camera_hub = camera_hub
@@ -44,7 +95,9 @@ class ContinuousDataCollectionRunner:
         self._kinematics = kinematics
         self._timer = timer or LoopTimer(fps)
 
-    def run(self, *, max_episodes: int | None = None, max_seconds: float | None = None) -> RunnerStats:
+    def run(
+        self, *, max_episodes: int | None = None, max_seconds: float | None = None
+    ) -> RunnerStats:
         stats = RunnerStats()
         started = time.monotonic()
         home = np.asarray(self._hardware.config.home_pose, dtype=np.float32)
@@ -67,7 +120,11 @@ class ContinuousDataCollectionRunner:
             self._visualizer.start()
             self._timer.start()
             self._visualizer.log_event("session_start", f"Task: {self._task}")
-            logger.info("continuous recording: home tolerance %.1f°, re-arm %.1f°", self._enter, self._exit)
+            logger.info(
+                "continuous recording: home tolerance %.1f deg, re-arm %.1f deg",
+                self._enter,
+                self._exit,
+            )
             while True:
                 now = time.monotonic()
                 if max_seconds is not None and now - started >= max_seconds:
@@ -85,7 +142,11 @@ class ContinuousDataCollectionRunner:
                     stats.episodes_discarded += 1
                     armed = False
                     self._visualizer.log_event("episode_aborted", "Episode discarded")
-                elif command is Command.FINISH and self._writer.episode_active and self._writer.frame_count:
+                elif (
+                    command is Command.FINISH
+                    and self._writer.episode_active
+                    and self._writer.frame_count
+                ):
                     self._writer.save_episode(self._task, success=False)
                     stats.episodes_saved += 1
                     armed = False
@@ -106,6 +167,7 @@ class ContinuousDataCollectionRunner:
                 last_action = applied
                 base = wrist = None
                 dt_sync_ms = None
+
                 if tick_started - started >= self._warmup_s:
                     try:
                         base, wrist, dt_sync = self._camera_hub.get_synced_frames()
@@ -115,16 +177,22 @@ class ContinuousDataCollectionRunner:
                                 raise CameraError(f"camera '{name}' frame is stale")
                     except CameraError as exc:
                         if has_sample:
-                            raise CameraError(f"camera failure during continuous recording: {exc}") from exc
+                            raise CameraError(
+                                f"camera failure during continuous recording: {exc}"
+                            ) from exc
                         if tick_started - last_camera_warning >= 2:
                             logger.warning("waiting for cameras: %s", exc)
                             last_camera_warning = tick_started
                     else:
                         if not self._writer.episode_active:
                             index = self._writer.start_episode(self._task)
-                            self._visualizer.log_event("episode_started", f"Recording episode {index:06d}")
+                            self._visualizer.log_event(
+                                "episode_started", f"Recording episode {index:06d}"
+                            )
                         state = RunnerState.RECORDING
-                        self._writer.append(FrameSample(tick_started, measured.positions, applied, base, wrist))
+                        self._writer.append(
+                            FrameSample(tick_started, measured.positions, applied, base, wrist)
+                        )
                         stats.frames_recorded += 1
                         if not has_sample:
                             capture_start = tick_started
@@ -137,27 +205,45 @@ class ContinuousDataCollectionRunner:
                             self._writer.save_episode(self._task, success=False)
                             stats.episodes_saved += 1
                             armed = False
-                            self._visualizer.log_event("episode_saved", "Arm returned to home pose")
+                            self._visualizer.log_event("episode_saved", "Arm returned home")
+
                 self._visualizer.log_step(
-                    session_time_s=tick_started - started, step_index=stats.timer_ticks + 1,
-                    state=state.value, measured_positions=measured.positions, applied_action=applied,
-                    base_rgb=base, wrist_rgb=wrist, dt_sync_ms=dt_sync_ms,
+                    session_time_s=tick_started - started,
+                    step_index=stats.timer_ticks + 1,
+                    state=state.value,
+                    measured_positions=measured.positions,
+                    applied_action=applied,
+                    base_rgb=base,
+                    wrist_rgb=wrist,
+                    dt_sync_ms=dt_sync_ms,
                     loop_fps=self._timer.summary().mean_fps,
                     episode_index=self._writer.active_episode_index,
-                    episode_frame_index=self._writer.frame_count if self._writer.episode_active else None,
+                    episode_frame_index=(
+                        self._writer.frame_count if self._writer.episode_active else None
+                    ),
                     kinematics=self._kinematics,
                 )
+
                 tick = self._timer.wait()
                 stats.timer_ticks += 1
                 last_dt = tick.period_s
                 if tick_started - last_report >= 5.0:
                     last_report = tick_started
                     summary = self._timer.summary()
-                    capture_fps = ((stats.frames_recorded - 1) / (tick_started - capture_start)
-                                   if capture_start is not None and tick_started > capture_start else 0)
-                    logger.info("capture %.1f fps | loop %.1f fps | overruns %d/%d | writer queue %d/%d",
-                                capture_fps, summary.mean_fps, summary.overruns, summary.ticks,
-                                self._writer.queue_depth, self._writer.queue_capacity)
+                    capture_fps = (
+                        (stats.frames_recorded - 1) / (tick_started - capture_start)
+                        if capture_start is not None and tick_started > capture_start
+                        else 0
+                    )
+                    logger.info(
+                        "capture %.1f fps | loop %.1f fps | overruns %d/%d | writer queue %d/%d",
+                        capture_fps,
+                        summary.mean_fps,
+                        summary.overruns,
+                        summary.ticks,
+                        self._writer.queue_depth,
+                        self._writer.queue_capacity,
+                    )
         except KeyboardInterrupt:
             stats.interrupted = True
             logger.info("interrupted by user; saving the partial episode")
@@ -165,8 +251,8 @@ class ContinuousDataCollectionRunner:
             failure = True
             raise
         finally:
-            # Save the last incomplete episode on normal exit or interruption.
-            # A writer failure is surfaced by drain/close, never silently ignored.
+            # Save the last partial episode on normal exit or interruption.
+            # Writer failures surface through drain/close.
             try:
                 self._writer.drain()
                 if failure and self._writer.episode_active:

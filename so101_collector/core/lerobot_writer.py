@@ -1,4 +1,4 @@
-"""Asynchronous adapter for the official LeRobot v3 dataset writer."""
+"""Async adapter for the official LeRobot v3 dataset writer."""
 
 from __future__ import annotations
 
@@ -6,23 +6,34 @@ import json
 import logging
 import queue
 import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 
 from so101_collector.config import JOINT_NAMES
-from so101_collector.core.dataset_writer import FrameSample
 from so101_collector.exceptions import DatasetWriteError, EpisodeStateError
 
 logger = logging.getLogger(__name__)
 
 
-class LeRobotWriter:
-    """Serialize samples on a worker so episode commits do not stop acquisition.
+@dataclass(frozen=True)
+class FrameSample:
+    """One control-loop tick: joint state, commanded action and two RGB frames."""
 
-    The bounded queue fails closed if disk or encoding cannot sustain the
-    capture rate; it never drops samples while pretending to maintain the fps.
+    timestamp: float
+    state: np.ndarray  # (6,) measured joint angles, deg
+    action: np.ndarray  # (6,) commanded joint angles, deg
+    base: np.ndarray  # (H, W, 3) uint8 RGB
+    wrist: np.ndarray  # (H, W, 3) uint8 RGB
+
+
+class LeRobotWriter:
+    """Writes samples from a background thread so saves do not stall capture.
+
+    The queue is bounded: if encoding falls behind, capture stops with an
+    error instead of quietly dropping frames.
     """
 
     def __init__(
@@ -36,7 +47,11 @@ class LeRobotWriter:
         queue_size: int = 120,
         dataset_class=None,
     ) -> None:
-        if not repo_id or any(part in ("", ".", "..") for part in repo_id.split("/")) or "\\" in repo_id:
+        if (
+            not repo_id
+            or any(part in ("", ".", "..") for part in repo_id.split("/"))
+            or "\\" in repo_id
+        ):
             raise ValueError("repo_id must be a dataset name or namespace/name")
         if len(repo_id.split("/")) > 2 or Path(repo_id).is_absolute() or ":" in repo_id:
             raise ValueError("repo_id must be a dataset name or namespace/name")
@@ -59,12 +74,17 @@ class LeRobotWriter:
                 from lerobot.datasets.lerobot_dataset import LeRobotDataset
             except ImportError as exc:
                 raise DatasetWriteError(
-                    "LeRobot dataset dependencies are required; install the project with pip install -e ."
+                    "LeRobot dataset dependencies are required; "
+                    "install the project with pip install -e ."
                 ) from exc
             dataset_class = LeRobotDataset
 
         features = {
-            key: {"dtype": "float32", "shape": (len(self._joint_names),), "names": list(self._joint_names)}
+            key: {
+                "dtype": "float32",
+                "shape": (len(self._joint_names),),
+                "names": list(self._joint_names),
+            }
             for key in ("observation.state", "action")
         }
         features.update({
@@ -77,10 +97,14 @@ class LeRobotWriter:
         try:
             if self._dir.exists():
                 if not info_path.is_file():
-                    raise DatasetWriteError(f"existing directory is not a LeRobot dataset: {self._dir}")
+                    raise DatasetWriteError(
+                        f"existing directory is not a LeRobot dataset: {self._dir}"
+                    )
                 info = json.loads(info_path.read_text(encoding="utf-8"))
                 if info.get("codebase_version") != "v3.0" or info.get("fps") != fps:
-                    raise DatasetWriteError("existing dataset is not LeRobot v3 or has a different fps")
+                    raise DatasetWriteError(
+                        "existing dataset is not LeRobot v3 or has a different fps"
+                    )
                 for key, expected in features.items():
                     actual = info.get("features", {}).get(key, {})
                     if (actual.get("dtype") != expected["dtype"]
@@ -140,7 +164,9 @@ class LeRobotWriter:
         try:
             self._queue.put_nowait((operation, payload))
         except queue.Full as exc:
-            raise DatasetWriteError("dataset writer cannot keep up; capture stopped without dropping frames") from exc
+            raise DatasetWriteError(
+                "dataset writer cannot keep up; capture stopped without dropping frames"
+            ) from exc
 
     def start_episode(self, task: str) -> int:
         self._check_error()
@@ -166,7 +192,9 @@ class LeRobotWriter:
         for name in ("base", "wrist"):
             image = np.asarray(getattr(sample, name))
             if image.dtype != np.uint8 or image.shape != (*self._image_shapes[name], 3):
-                raise DatasetWriteError(f"{name} camera frame does not match its configured RGB shape")
+                raise DatasetWriteError(
+                    f"{name} camera frame does not match its configured RGB shape"
+                )
             frame[f"observation.images.{name}"] = image.copy()
         self._enqueue("frame", frame)
         self._frame_count += 1

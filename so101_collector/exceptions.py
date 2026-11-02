@@ -1,8 +1,7 @@
-"""Exception hierarchy for the SO-101 data collection pipeline.
+"""Exception hierarchy for the data collection pipeline.
 
-All pipeline errors derive from :class:`SO101Error` so callers can catch a
-single base class at the session boundary while still distinguishing
-subsystems internally.
+Every pipeline error derives from ``SO101Error`` so callers can catch one
+base class at the session boundary.
 """
 
 from __future__ import annotations

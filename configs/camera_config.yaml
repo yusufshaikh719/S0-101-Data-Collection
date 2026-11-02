@@ -1,12 +1,8 @@
-# ---------------------------------------------------------------------------
-# Dual-camera vision system (base + wrist)
-# ---------------------------------------------------------------------------
-# Device paths MUST be persistent /dev/v4l/by-id symlinks so a reboot can
-# never swap the base and wrist cameras (zero index-drift requirement).
-# Find yours with:  ls -l /dev/v4l/by-id/
+# Dual cameras (base + wrist). Device paths must be persistent /dev/v4l/by-id
+# symlinks so a reboot cannot swap the cameras. List them with:
+#   ls -l /dev/v4l/by-id/
 #
-# MJPG fourcc is required for low-latency 640x480 @ 30 FPS streaming; the
-# driver's default (YUYV) cannot sustain 30 FPS at this resolution.
+# MJPG is required for 640x480 at 30 FPS; the YUYV default cannot sustain it.
 sync_tolerance_ms: 20.0 # software frame-sync warning threshold
 
 cameras:

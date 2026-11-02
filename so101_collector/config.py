@@ -1,24 +1,20 @@
 """Configuration models and YAML loaders.
 
-The pipeline addresses hardware through *persistent* device identifiers only
-(``/dev/serial/by-id/*``, ``/dev/v4l/by-id/*``) so a reboot or a re-plugged
-USB hub can never silently swap the follower arm with the leader arm, or the
-base camera with the wrist camera (zero index-drift requirement).  Loading a
-config that contains a dynamic path such as ``/dev/video0`` raises
-:class:`~so101_collector.exceptions.ConfigError` unless the config explicitly
+Hardware is addressed through persistent device identifiers only
+(``/dev/serial/by-id/*``, ``/dev/v4l/by-id/*``), so a reboot or a re-plugged
+hub cannot swap the follower and leader arms or the two cameras. A config
+with a dynamic path such as ``/dev/video0`` raises ``ConfigError`` unless it
 opts out with ``allow_dynamic_*: true``.
-
-The module intentionally depends only on the standard library and PyYAML so
-it can be imported without cameras, serial adapters, or OpenCV present.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -74,7 +70,10 @@ def _as_mapping(data: Any, context: str) -> Mapping[str, Any]:
 def _reject_unknown_keys(data: Mapping[str, Any], allowed: set[str], context: str) -> None:
     unknown = sorted(set(data) - allowed)
     if unknown:
-        raise ConfigError(f"{context}: unknown key(s) {', '.join(unknown)}; allowed: {', '.join(sorted(allowed))}")
+        allowed_keys = ", ".join(sorted(allowed))
+        raise ConfigError(
+            f"{context}: unknown key(s) {', '.join(unknown)}; allowed: {allowed_keys}"
+        )
 
 
 def _get(data: Mapping[str, Any], key: str, context: str, default: Any = _MISSING) -> Any:
@@ -122,10 +121,14 @@ class JointSpec:
 
     def __post_init__(self) -> None:
         if self.min_deg >= self.max_deg:
-            raise ConfigError(f"joint '{self.name}': min_deg ({self.min_deg}) must be < max_deg ({self.max_deg})")
+            raise ConfigError(
+                f"joint '{self.name}': min_deg ({self.min_deg}) must be less than "
+                f"max_deg ({self.max_deg})"
+            )
         if not self.min_deg <= self.home_deg <= self.max_deg:
             raise ConfigError(
-                f"joint '{self.name}': home_deg ({self.home_deg}) outside [{self.min_deg}, {self.max_deg}]"
+                f"joint '{self.name}': home_deg ({self.home_deg}) outside "
+                f"[{self.min_deg}, {self.max_deg}]"
             )
         if not 1 <= self.servo_id <= 253:
             raise ConfigError(f"joint '{self.name}': servo_id {self.servo_id} outside 1..253")
@@ -175,9 +178,13 @@ class KinematicsConfig:
             if getattr(self, name) <= 0:
                 raise ConfigError(f"kinematics.{name} must be > 0, got {getattr(self, name)}")
         if self.floor_clearance_mm < 0:
-            raise ConfigError(f"kinematics.floor_clearance_mm must be >= 0, got {self.floor_clearance_mm}")
+            raise ConfigError(
+                f"kinematics.floor_clearance_mm must be >= 0, got {self.floor_clearance_mm}"
+            )
         if not 0 <= self.reach_margin_mm < min(self.upper_arm_mm, self.forearm_mm):
-            raise ConfigError("kinematics.reach_margin_mm must be in [0, min(upper_arm_mm, forearm_mm))")
+            raise ConfigError(
+                "kinematics.reach_margin_mm must be in [0, min(upper_arm_mm, forearm_mm))"
+            )
 
     @property
     def max_reach_mm(self) -> float:
@@ -309,12 +316,18 @@ class RobotConfig:
             baudrate=_as_int(data.get("baudrate", 1_000_000), "robot config.baudrate"),
             timeout_s=_as_float(data.get("timeout_s", 0.05), "robot config.timeout_s"),
             max_retries=_as_int(data.get("max_retries", 3), "robot config.max_retries"),
-            retry_backoff_s=_as_float(data.get("retry_backoff_s", 0.002), "robot config.retry_backoff_s"),
+            retry_backoff_s=_as_float(
+                data.get("retry_backoff_s", 0.002), "robot config.retry_backoff_s"
+            ),
             allow_dynamic_port=_as_bool(
                 data.get("allow_dynamic_port", False), "robot config.allow_dynamic_port"
             ),
             kinematics=KinematicsConfig.from_dict(data.get("kinematics")),
-            leader_port=None if leader_port is None else _as_str(leader_port, "robot config.leader_port"),
+            leader_port=(
+                None
+                if leader_port is None
+                else _as_str(leader_port, "robot config.leader_port")
+            ),
             leader_offset_deg=tuple(
                 _as_float(v, "leader_offset_deg[]") for v in offsets_raw
             ),
@@ -369,7 +382,9 @@ class CameraConfig:
         if self.fps <= 0:
             raise ConfigError(f"camera '{self.name}': fps must be > 0, got {self.fps}")
         if len(self.fourcc) != 4:
-            raise ConfigError(f"camera '{self.name}': fourcc must be 4 characters, got '{self.fourcc}'")
+            raise ConfigError(
+                f"camera '{self.name}': fourcc must be 4 characters, got '{self.fourcc}'"
+            )
         if self.buffer_size < 1:
             raise ConfigError(f"camera '{self.name}': buffer_size must be >= 1")
 
@@ -429,7 +444,9 @@ class VisionConfig:
             raise ConfigError(f"duplicate camera names: {names}")
         missing = {"base", "wrist"} - set(names)
         if missing:
-            raise ConfigError(f"vision config must define the {sorted(missing)} camera(s); found {names}")
+            raise ConfigError(
+                f"vision config must define the {sorted(missing)} camera(s); found {names}"
+            )
 
     @property
     def by_name(self) -> dict[str, CameraConfig]:
@@ -484,7 +501,9 @@ def default_config_dir() -> Path:
     candidates.append(Path.cwd() / "configs")
     candidates.append(Path(__file__).resolve().parent.parent / "configs")
     for candidate in candidates:
-        if (candidate / "robot_config.yaml").is_file() and (candidate / "camera_config.yaml").is_file():
+        has_robot = (candidate / "robot_config.yaml").is_file()
+        has_camera = (candidate / "camera_config.yaml").is_file()
+        if has_robot and has_camera:
             return candidate
     searched = ", ".join(str(c) for c in candidates)
     raise ConfigError(

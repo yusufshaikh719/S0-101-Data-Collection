@@ -15,9 +15,7 @@ The tool direction inside the plane is ``q_lift + q_elbow + q_wrist``; the
 default grasp approach points the tool straight down
 (``tool_pitch_deg = -90``), which is what floor pickup requires.
 
-The solver is intentionally analytic (no iterative numerical IK): it runs in
-constant time inside the 30 Hz control loop and is fully unit-testable via
-FK/IK round trips.
+The solver is analytic, so it runs in constant time inside the control loop.
 """
 
 from __future__ import annotations
@@ -133,11 +131,9 @@ class SO101Kinematics:
         """Solve joint angles for a tool-tip target.
 
         Returns ``[shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
-        wrist_roll]`` in degrees (the gripper is independent of pose and must
-        be supplied by the caller).
-
-        Raises :class:`IKError` when the target is outside the reachable
-        annulus - run :meth:`clamp_workspace` first for a guaranteed solve.
+        wrist_roll]`` in degrees. The gripper is supplied by the caller.
+        Raises ``IKError`` when the target is outside the reachable annulus;
+        run ``clamp_workspace`` first for a guaranteed solve.
         """
         if elbow not in ("up", "down"):
             raise ValueError(f"elbow must be 'up' or 'down', got {elbow!r}")
@@ -191,12 +187,10 @@ class SO101Kinematics:
 
     # -- workspace enforcement ---------------------------------------------
     def clamp_workspace(self, position_mm: np.ndarray | list[float]) -> np.ndarray:
-        """Clamp a tool-tip target to the safe software workspace.
+        """Clamp a tool-tip target to the safe workspace.
 
-        Enforces the specification's floor rule (the gripper tip stops
-        ``floor_clearance_mm`` - 2 mm - above the floor instead of relying on
-        a physical motor stall) plus reachability limits, so
-        :meth:`inverse` always succeeds afterwards.
+        The tip stays ``floor_clearance_mm`` above the floor and inside the
+        reachable radius, so ``inverse`` succeeds afterwards.
         """
         cfg = self._cfg
         p = np.array(position_mm, dtype=np.float64).reshape(-1).copy()

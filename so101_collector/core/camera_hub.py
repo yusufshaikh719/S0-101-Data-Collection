@@ -1,17 +1,9 @@
-"""Multi-threaded dual-camera acquisition with software frame synchronization.
+"""Dual-camera capture with software frame synchronization.
 
-Each camera runs in its own daemon thread (``BaseCameraThread`` /
-``WristCameraThread``) that continuously overwrites a double-buffered
-:class:`FramePacket` under a lock, so the 30 Hz control loop never blocks on
-USB/V4L2 I/O and a stalled control loop never causes frame drops.
-
-The control loop pulls synchronized frames through
-:meth:`CameraHub.get_synced_frames`, which returns the latest base + wrist
-frame together with the timestamp delta ``dt_sync = |t_base - t_wrist|`` and
-warns when it exceeds the configured tolerance (20 ms by default).
-
-Device addressing: cameras are opened via their persistent ``/dev/v4l/by-id``
-paths (validated at config load), never dynamic ``/dev/videoN`` nodes.
+Each camera runs in a daemon thread that publishes its latest frame under a
+lock, so the control loop never blocks on V4L2 I/O. ``get_synced_frames()``
+returns the newest base and wrist frames with their timestamp delta and warns
+when it exceeds the configured tolerance.
 """
 
 from __future__ import annotations
@@ -19,9 +11,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Protocol
 
 import numpy as np
 
@@ -132,7 +125,11 @@ class V4L2Camera:
                     self._config.name,
                     self._config.exposure,
                 )
-            logger.info("camera '%s': exposure locked at %s", self._config.name, self._config.exposure)
+            logger.info(
+                "camera '%s': exposure locked at %s",
+                self._config.name,
+                self._config.exposure,
+            )
 
         actual = (
             int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
@@ -219,7 +216,8 @@ class CameraWorker(threading.Thread):
                     if failures >= self._max_read_failures:
                         self._fail(
                             CameraError(
-                                f"camera '{self._config.name}': {failures} consecutive read failures"
+                                f"camera '{self._config.name}': "
+                                f"{failures} consecutive read failures"
                             )
                         )
                         return
@@ -243,14 +241,21 @@ class CameraWorker(threading.Thread):
         with self._lock:
             self._sequence += 1
             self._latest = FramePacket(
-                frame=frame, captured_at=captured_at, sequence=self._sequence, camera=self._config.name
+                frame=frame,
+                captured_at=captured_at,
+                sequence=self._sequence,
+                camera=self._config.name,
             )
             self._frames += 1
             if self._last_capture_at is not None:
                 interval = captured_at - self._last_capture_at
                 if interval > 0:
                     instant_fps = 1.0 / interval
-                    self._fps = instant_fps if self._fps == 0.0 else 0.9 * self._fps + 0.1 * instant_fps
+                    self._fps = (
+                        instant_fps
+                        if self._fps == 0.0
+                        else 0.9 * self._fps + 0.1 * instant_fps
+                    )
             self._last_capture_at = captured_at
 
     def _recover(self, exc: CameraError) -> bool:
@@ -390,7 +395,10 @@ class CameraHub:
     def _worker(self, name: str) -> CameraWorker:
         worker = self._workers.get(name)
         if worker is None:
-            raise CameraError(f"camera '{name}' is not managed by this hub (have: {list(self._workers)})")
+            raise CameraError(
+                f"camera '{name}' is not managed by this hub "
+                f"(have: {list(self._workers)})"
+            )
         return worker
 
     def get_frame(self, name: str) -> FramePacket:

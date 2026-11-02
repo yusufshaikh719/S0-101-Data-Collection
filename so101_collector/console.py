@@ -1,17 +1,14 @@
-"""Console command input: keyboard (TTY) and gamepad trigger mappings.
+"""Keyboard and gamepad command input.
 
-The recording loop polls :meth:`CommandReader.read` once per tick and reacts
-to edge-triggered :class:`Command` values::
+The recording loop polls the reader once per tick:
 
-    Space / gamepad trigger : START   - begin episode (2 s warmup)
-    Enter  / green button   : FINISH  - save the episode to disk
-    Esc    / red button     : ABORT   - discard the episode (RAM only)
-    R      / north button   : RESET   - drive the arm to its home pose
-    Q                        : QUIT   - end the session
+    Enter / green button   FINISH  save the current episode
+    Esc   / red button     ABORT   discard the current episode
+    R                      RESET   drive the arm to its home pose
+    Q                      QUIT    save any partial episode and exit
 
-Keyboard input uses cbreak mode on POSIX (``termios``/``select``) and
-``msvcrt`` on Windows; when stdin is not a TTY the reader silently disables
-itself so the pipeline can run headless (CI, ``--max-episodes`` runs).
+Keyboard input uses cbreak mode on POSIX and ``msvcrt`` on Windows. When stdin
+is not a TTY the reader disables itself so headless runs still work.
 """
 
 from __future__ import annotations
@@ -29,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class Command(Enum):
-    START = "start"
     FINISH = "finish"
     ABORT = "abort"
     RESET = "reset"
@@ -37,7 +33,6 @@ class Command(Enum):
 
 
 DEFAULT_KEY_MAP: dict[str, Command] = {
-    " ": Command.START,
     "\r": Command.FINISH,
     "\n": Command.FINISH,
     "\x1b": Command.ABORT,
@@ -47,9 +42,7 @@ DEFAULT_KEY_MAP: dict[str, Command] = {
     "Q": Command.QUIT,
 }
 
-#: Semantic gamepad button -> command (see devices.DEFAULT_GAMEPAD_BUTTONS).
 DEFAULT_GAMEPAD_MAP: dict[str, Command] = {
-    "trigger": Command.START,
     "green": Command.FINISH,
     "red": Command.ABORT,
     "reset": Command.RESET,
@@ -65,7 +58,7 @@ class CommandReader(Protocol):
 
 
 class NullCommandReader:
-    """Headless reader - always returns ``None``."""
+    """Headless reader that always returns ``None``."""
 
     def read(self) -> Command | None:
         return None
@@ -75,11 +68,9 @@ class NullCommandReader:
 
 
 class TimedCommandReader:
-    """Headless auto-pilot: START, then FINISH after ``record_s``, forever.
+    """Headless auto-pilot: FINISH every ``record_s`` seconds.
 
-    Used by ``so101-record --auto`` for CI smoke tests and unattended
-    pipeline validation.  ``record_s`` must exceed the warmup duration,
-    otherwise FINISH would land in the WARMUP state and cancel it.
+    Used by ``so101-record --auto`` for CI smoke tests.
     """
 
     def __init__(self, record_s: float, *, clock=time.monotonic) -> None:
@@ -87,18 +78,15 @@ class TimedCommandReader:
             raise ValueError(f"record_s must be > 0, got {record_s}")
         self._record_s = float(record_s)
         self._clock = clock
-        self._phase = "start"
-        self._recording_since = 0.0
+        self._recording_since: float | None = None
 
     def read(self) -> Command | None:
-        if self._phase == "start":
-            self._phase = "recording"
-            self._recording_since = self._clock()
-            return Command.START
-        if self._phase == "recording" and (
-            self._clock() - self._recording_since
-        ) >= self._record_s:
-            self._phase = "start"
+        now = self._clock()
+        if self._recording_since is None:
+            self._recording_since = now
+            return None
+        if now - self._recording_since >= self._record_s:
+            self._recording_since = now
             return Command.FINISH
         return None
 
@@ -109,7 +97,9 @@ class TimedCommandReader:
 class KeyboardCommandReader:
     """Non-blocking single-key reader with raw-mode lifecycle management."""
 
-    def __init__(self, *, key_map: dict[str, Command] | None = None, enabled: bool | None = None) -> None:
+    def __init__(
+        self, *, key_map: dict[str, Command] | None = None, enabled: bool | None = None
+    ) -> None:
         self._key_map = dict(key_map) if key_map is not None else dict(DEFAULT_KEY_MAP)
         self._saved_attrs = None
         self._fd: int | None = None
@@ -129,9 +119,7 @@ class KeyboardCommandReader:
             except Exception as exc:  # pragma: no cover - exotic terminals
                 logger.warning("keyboard input disabled (cannot enter cbreak mode): %s", exc)
                 self._enabled = False
-        elif os.name == "nt":  # pragma: no cover - Windows only
-            pass  # msvcrt.kbhit() is already non-blocking
-        else:  # pragma: no cover
+        elif os.name != "nt":  # pragma: no cover
             logger.warning("keyboard input disabled on platform %s", sys.platform)
             self._enabled = False
 
@@ -157,9 +145,9 @@ class KeyboardCommandReader:
         if not data:
             return None
         if data == b"\x1b":
-            return self._key_map.get("\x1b")  # bare Esc -> ABORT
+            return self._key_map.get("\x1b")
         if data.startswith(b"\x1b["):
-            return None  # arrow/function sequence - ignore
+            return None  # arrow/function key sequence
         return self._key_map.get(data[:1].decode("utf-8", errors="ignore"))
 
     def _read_windows(self) -> Command | None:  # pragma: no cover - Windows only
@@ -169,7 +157,7 @@ class KeyboardCommandReader:
             return None
         char = msvcrt.getwch()
         if char in ("\x00", "\xe0"):
-            msvcrt.getwch()  # swallow the scan-code half of the chord
+            msvcrt.getwch()  # scan-code half of the chord
             return None
         return self._key_map.get(char)
 
@@ -218,7 +206,7 @@ class GamepadCommandReader:
 
 
 class CompositeCommandReader:
-    """Fan-in over several readers (e.g. keyboard + gamepad simultaneously)."""
+    """Fan-in over several readers, for example keyboard plus gamepad."""
 
     def __init__(self, *readers: CommandReader) -> None:
         self._readers = readers

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "so101-collector"
 version = "0.1.0"
-description = "Production-grade multimodal data collection pipeline for SO-101 floor pick-and-place demonstrations"
+description = "Data collection pipeline for SO-101 floor pick-and-place demonstrations"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,24 +13,13 @@ dependencies = [
     "pyserial>=3.5",
     "opencv-python>=4.8",
     "PyYAML>=6.0",
-    "pandas>=2.0",
     "lerobot[dataset]==0.6.1",
 ]
 
 [project.optional-dependencies]
-# H.264 video encoding (preferred over the OpenCV fallback).
-video = ["av>=11.0"]
-# LeRobot-compatible Parquet tables (falls back to .npz without it).
-parquet = ["pyarrow>=14.0"]
-# Rerun multimodal live visualizer & logger.
+# Live Rerun viewer.
 visualize = ["rerun-sdk>=0.18"]
-dev = [
-    "pytest>=7.4",
-    "ruff>=0.4",
-    "av>=11.0",
-    "pyarrow>=14.0",
-    "rerun-sdk>=0.18",
-]
+dev = ["pytest>=7.4", "ruff>=0.4", "rerun-sdk>=0.18"]
 
 [project.scripts]
 so101-record = "so101_collector.scripts.record_episodes:main"
@@ -47,7 +36,7 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

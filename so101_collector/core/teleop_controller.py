@@ -1,26 +1,18 @@
 """Teleoperation sources that produce follower joint-angle targets.
 
-Two backends, selected by the recording CLI:
-
-* :class:`LeaderArmTeleop` - 1:1 passive leader twin: the follower mirrors
-  the leader's measured joint angles directly (plus optional mounting
-  offsets).  Gripper mapping falls out of the same read path.
-* :class:`CartesianTeleop` - 6-DOF SpaceMouse/gamepad rate control through
-  the analytical IK (:mod:`so101_collector.core.ik`), with the software
-  floor clamp applied before every solve.
-
-Both implement the :class:`TeleopSource` protocol so
-:class:`~so101_collector.core.runner.DataCollectionRunner` treats them
-interchangeably: ``read(dt)`` returns the next ``action`` vector (or
-``None`` when the device has no fresh data, in which case the runner holds
-the previous command).
+``LeaderArmTeleop`` mirrors a passive leader arm. ``CartesianTeleop`` turns
+SpaceMouse or gamepad rates into tool-tip motion through the analytical IK.
+Both implement ``TeleopSource``: ``read(dt)`` returns the next action vector,
+or ``None`` when the device has no fresh data and the runner should hold the
+previous command.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 import numpy as np
 
@@ -59,7 +51,9 @@ class LeaderArmTeleop:
             offsets_deg, dtype=np.float64
         )
         if offsets.size != len(JOINT_NAMES):
-            raise ValueError(f"offsets_deg must have {len(JOINT_NAMES)} entries, got {offsets.size}")
+            raise ValueError(
+                f"offsets_deg must have {len(JOINT_NAMES)} entries, got {offsets.size}"
+            )
         self._offsets = offsets
 
     @property
@@ -81,10 +75,8 @@ class LeaderArmTeleop:
 class CartesianTeleop:
     """Rate control of the tool tip through the analytical IK.
 
-    Integrates device velocities into a tool-tip position, clamps it to the
-    safe workspace (2 mm floor stop etc.), solves the IK and returns the full
-    6-DoF action.  On an unreachable target the previous joint command is
-    held and the event logged at debug level.
+    Velocities are integrated into a tool-tip target, clamped to the
+    workspace and solved. An unreachable target keeps the previous command.
     """
 
     def __init__(
@@ -146,7 +138,11 @@ class CartesianTeleop:
         self._position = self._kin.clamp_workspace(self._position)
         self._roll_deg += command.roll_deg_s * dt
         self._gripper_deg = float(
-            np.clip(self._gripper_deg + command.gripper_deg_s * dt, self._gripper_min, self._gripper_max)
+            np.clip(
+                self._gripper_deg + command.gripper_deg_s * dt,
+                self._gripper_min,
+                self._gripper_max,
+            )
         )
 
         try:

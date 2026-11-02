@@ -1,13 +1,8 @@
-"""Drift-compensating fixed-rate loop timer.
+"""Fixed-rate loop timer that compensates for drift.
 
-A naive ``time.sleep(1 / fps)`` loop drifts without bound: every sleep
-overshoots by a small scheduling error and the accumulated phase error makes
-the effective frame rate wander.  :class:`LoopTimer` instead schedules each
-tick against an *absolute* monotonic deadline (``next_tick += target_dt``),
-so per-tick error never accumulates.
-
-The timer is fully injectable (clock + sleep callables) which makes the
-scheduling behaviour deterministic under test.
+A ``sleep(1 / fps)`` loop accumulates scheduling error. ``LoopTimer``
+schedules each tick against an absolute monotonic deadline instead, so
+per-tick error does not add up. Clock and sleep are injectable for tests.
 """
 
 from __future__ import annotations
@@ -80,11 +75,10 @@ class TimerSummary:
 
 
 class LoopTimer:
-    """Precision 30 Hz (default) loop timer with overrun accounting.
+    """Loop timer with overrun accounting.
 
-    Overruns are always counted; ones exceeding 5 ms (by default) are also
-    logged as warnings.  Pass ``overrun_warn_threshold_s=0`` to log every
-    single overrun, as in the specification's reference snippet.
+    Overruns are always counted; those above 5 ms are also logged. Pass
+    ``overrun_warn_threshold_s=0`` to log every overrun.
     """
 
     def __init__(
@@ -166,17 +160,13 @@ class LoopTimer:
     def wait(self) -> TickStats:
         """Block until the next scheduled tick and return timing statistics.
 
-        Uses a drift-compensating absolute deadline with a hybrid
-        coarse-sleep + bounded spin (see ``__init__``), so per-tick error
-        never accumulates and jitter stays within the <5 ms requirement
-        regardless of the host's sleep granularity.
-
-        Should be called *after* the work of each iteration, mirroring the
-        pattern from the specification::
+        Sleeps to just before the deadline, then spins, so jitter does not
+        depend on the host's sleep granularity. Call after the work of each
+        iteration::
 
             timer.start()
             while recording:
-                ...step acquisition and teleop...
+                ...acquisition and teleop...
                 stats = timer.wait()
         """
         if not self._running:

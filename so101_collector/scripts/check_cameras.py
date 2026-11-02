@@ -1,21 +1,14 @@
-"""Verification tool for the acceptance checklist (specification, section 6).
+"""Verify camera frame rate, frame sync and serial latency.
 
-Runs the dual-camera hub for ``--duration`` seconds (default: 5 minutes) and
-verifies::
-
-    [ ] Frame rate stability : both cameras 30.0 +/- 1.0 FPS in every window
-    [ ] Camera sync drift    : max |t_base - t_wrist| < 15 ms (strict)
-    [ ] Serial latency       : Feetech read/write roundtrip < 8 ms
-    [ ] Visual field coverage: manual - snapshots written for inspection
-    [ ] Storage integrity    : manual - load with LeRobotDataset
-
-Exit code 0 when every automated check passes, 1 otherwise.
+Runs both cameras for ``--duration`` seconds (5 minutes by default) and checks
+30 FPS +/- 1, sync drift under 15 ms and serial round trips under 8 ms. Exits
+non-zero if an automated check fails.
 
 Examples::
 
-    so101-check-cameras                       # full 5-minute acceptance run
-    so101-check-cameras --duration 30         # quick smoke check
-    so101-check-cameras --simulate            # no hardware attached
+    so101-check-cameras                       # full run
+    so101-check-cameras --duration 30         # quick check
+    so101-check-cameras --simulate            # no hardware
     so101-check-cameras --skip-serial \\
         --snapshot-dir ./camera_snapshots     # vision-only + FOV evidence
 """
@@ -39,10 +32,10 @@ from so101_collector.timing import LoopTimer
 logger = logging.getLogger("so101.check")
 
 MANUAL_CHECKS = (
-    "Visual field coverage: base camera shows the pick area + arm base; wrist camera keeps "
-    "the object in frame during descent (inspect the snapshots).",
-    "Storage integrity: recorded episodes load cleanly with "
-    "lerobot.common.datasets.lerobot_dataset.LeRobotDataset.",
+    "Visual field coverage: the base camera sees the pick area and arm base, and the "
+    "wrist camera keeps the object in frame during descent (inspect the snapshots).",
+    "Storage integrity: recorded episodes load with "
+    "lerobot.datasets.lerobot_dataset.LeRobotDataset.",
 )
 
 

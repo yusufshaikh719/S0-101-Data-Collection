@@ -1,17 +1,10 @@
-"""Feetech STS serial-bus hardware interface for the SO-101 follower arm.
+"""Feetech STS serial bus for the SO-101 follower arm.
 
-Layering:
+``FeetechBus`` handles framing, checksums and serial I/O and raises on the
+first failure. ``SO101HardwareInterface`` adds tick/degree conversion, joint
+clamping, state reads and retries.
 
-* :class:`FeetechBus` - raw packet transport (framing, checksums, serial I/O).
-  It raises :class:`BusCommunicationError` on the *first* failure and never
-  retries.
-* :class:`SO101HardwareInterface` - joint-aware API: tick/degree conversion,
-  per-joint safety clamping, read state assembly, and the error-recovery policy
-  from the specification (retry dropped packets up to ``max_retries`` times
-  before raising).
-
-Both classes accept dependency-injected transports so unit tests run without
-hardware.  The wire protocol is the Dynamixel-1.0-style Feetech framing::
+Wire format::
 
     0xFF 0xFF | ID | LENGTH | INSTRUCTION | PARAMS... | CHECKSUM
     CHECKSUM  = ~(ID + LENGTH + INSTRUCTION + PARAMS...) & 0xFF
@@ -22,9 +15,10 @@ from __future__ import annotations
 import logging
 import struct
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Protocol, Sequence
+from typing import Protocol
 
 import numpy as np
 
@@ -80,7 +74,7 @@ def build_instruction_packet(device_id: int, instruction: int, params: bytes = b
     return b"\xff\xff" + body + bytes((checksum,))
 
 
-def parse_status_packet(raw: bytes) -> "StatusPacket":
+def parse_status_packet(raw: bytes) -> StatusPacket:
     """Parse a status packet, validating header length and checksum."""
     if len(raw) < 6:
         raise BusCommunicationError(f"status packet truncated ({len(raw)} bytes): {raw.hex()}")
@@ -399,11 +393,10 @@ class SO101HardwareInterface:
         )
 
     def write_positions(self, targets: Sequence[float]) -> np.ndarray:
-        """Clamp and write target joint angles (degrees).
+        """Clamp and write target joint angles in degrees.
 
-        Returns the clamped targets that were actually commanded.  Clamping
-        keeps the gripper ``floor_clearance_mm`` clear of the floor and the
-        servos inside their configured stroke (no reliance on motor stall).
+        Returns the clamped targets that were sent. Clamping keeps each servo
+        inside its configured range.
         """
         desired = np.asarray(targets, dtype=np.float64).reshape(-1)
         if desired.size != len(self._config.joints):
@@ -441,7 +434,12 @@ class SO101HardwareInterface:
             (joint.servo_id, struct.pack("<H", degrees_to_ticks(clamped[index], joint.offset_deg)))
             for index, joint in enumerate(self._config.joints)
         ]
-        self._robust("sync_write(goal_position)", self._bus.sync_write, Register.GOAL_POSITION, items)
+        self._robust(
+            "sync_write(goal_position)",
+            self._bus.sync_write,
+            Register.GOAL_POSITION,
+            items,
+        )
         return clamped.astype(np.float32)
 
     def go_home(self) -> np.ndarray:
@@ -495,10 +493,10 @@ class SO101HardwareInterface:
 
     # -- error recovery ----------------------------------------------------
     def _robust(self, label: str, operation: Callable[..., object], *args: object) -> object:
-        """Run ``operation`` with the specification's retry policy.
+        """Run ``operation`` with retries.
 
-        Retries transient packet loss up to ``max_retries`` times (with a
-        short backoff), then raises :class:`BusCommunicationError`.
+        Transient packet loss is retried up to ``max_retries`` times with a
+        short backoff, then raises ``BusCommunicationError``.
         """
         attempts = self._config.max_retries + 1
         last_error: BusCommunicationError | None = None

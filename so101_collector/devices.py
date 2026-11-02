@@ -1,16 +1,9 @@
-"""Input-device layer: Linux evdev readers for SpaceMouse / gamepad.
+"""Linux evdev readers for a SpaceMouse and a gamepad.
 
-Stdlib only (no ``evdev``/``hidapi`` dependency): events are read directly
-from ``/dev/input/event*`` with ``os.O_NONBLOCK`` and unpacked with the
-kernel's ``struct input_event`` layout.
-
-Device paths must be persistent (``/dev/input/by-id/*``) so replugging can
-never swap the SpaceMouse with the gamepad - same zero index-drift rule as
-cameras and serial ports.
-
-Shared value types live here (``CartCommand``, the ``InputDevice`` /
-``ButtonSource`` protocols) because this module sits at the bottom of the
-import graph: ``devices`` -> ``teleop_controller`` / ``console`` -> ``runner``.
+Events are read from ``/dev/input/event*`` with ``os.O_NONBLOCK`` and
+unpacked with the kernel's ``struct input_event`` layout, so no extra
+dependency is needed. Device paths must be persistent ``/dev/input/by-id``
+paths.
 """
 
 from __future__ import annotations
@@ -20,41 +13,31 @@ import math
 import os
 import struct
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Protocol
 
 from so101_collector.exceptions import TeleopError
 
 logger = logging.getLogger(__name__)
 
-# --- Linux input event codes (from linux/input-event-codes.h) --------------
+# Linux input event codes (linux/input-event-codes.h).
 EV_KEY = 0x01
 EV_ABS = 0x03
 
 ABS_X, ABS_Y, ABS_Z = 0x00, 0x01, 0x02
-ABS_RX, ABS_RY, ABS_RZ = 0x03, 0x04, 0x05
+ABS_RZ = 0x05
 
 BTN_0 = 0x100
 BTN_1 = 0x101
-BTN_SOUTH = 0x130  # A / cross  (green)
+BTN_SOUTH = 0x130  # A / cross (green)
 BTN_EAST = 0x131  # B / circle (red)
 BTN_NORTH = 0x133  # Y / triangle
-BTN_WEST = 0x134  # X / square
-BTN_TL = 0x136  # left bumper
-BTN_TR = 0x137
-BTN_TL2 = 0x138  # left trigger (when reported as a key)
-BTN_TR2 = 0x139
-BTN_SELECT = 0x13A
-BTN_START = 0x13B
-BTN_MODE = 0x13C
 
-#: Semantic gamepad button names used by the command reader.
 DEFAULT_GAMEPAD_BUTTONS: dict[int, str] = {
     BTN_SOUTH: "green",  # finish episode
     BTN_EAST: "red",  # abort episode
     BTN_NORTH: "reset",  # home pose
-    BTN_TL: "start",  # "trigger" starts an episode
-    BTN_TL2: "start",
 }
 
 #: SpaceMouse buttons mapped to gripper rates.
