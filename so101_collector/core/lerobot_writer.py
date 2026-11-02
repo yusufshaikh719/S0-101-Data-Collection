@@ -65,6 +65,7 @@ class LeRobotWriter:
         self._joint_names = tuple(joint_names)
         self._task: str | None = None
         self._frame_count = 0
+        self._frames_queued = 0
         self._active = False
         self._error: Exception | None = None
         self._closed = False
@@ -198,6 +199,7 @@ class LeRobotWriter:
             frame[f"observation.images.{name}"] = image.copy()
         self._enqueue("frame", frame)
         self._frame_count += 1
+        self._frames_queued += 1
 
     def save_episode(self, task_name: str, success: bool = True) -> None:
         del success  # Returning home does not imply success.
@@ -221,6 +223,9 @@ class LeRobotWriter:
             operation, payload = self._queue.get()
             try:
                 if operation == "close":
+                    if not self._frames_queued:
+                        logger.warning("no frames were captured; dataset not finalized")
+                        return
                     try:
                         self._dataset.finalize()
                     except Exception as exc:

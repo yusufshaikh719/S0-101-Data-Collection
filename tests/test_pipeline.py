@@ -90,8 +90,16 @@ def test_continuous_recording_splits_only_on_home_reentry(tmp_path):
     stats = runner.run(max_seconds=10)
 
     episodes = writer._dataset.episodes
-    assert len(episodes) == stats.episodes_saved == 3
+    # Episodes open on departure from home and close on the home-arrival
+    # sample, so the idle startup frames are not saved as a third episode.
+    assert len(episodes) == stats.episodes_saved == 2
     assert sum(map(len, episodes)) == stats.frames_recorded
     assert all(len(episode) > 1 for episode in episodes)
+    home = np.asarray(robot.home_pose)
+    for episode in episodes:
+        first = episode[0]["observation.state"]
+        last = episode[-1]["observation.state"]
+        assert np.abs(first - home).max() > 5.0
+        assert np.all(np.abs(last - home) <= 5.0 + 1e-6)
     assert not hardware.is_open
     assert not hub.running

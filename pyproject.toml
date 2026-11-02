@@ -22,6 +22,7 @@ visualize = ["rerun-sdk>=0.18"]
 dev = ["pytest>=7.4", "ruff>=0.4", "rerun-sdk>=0.18"]
 
 [project.scripts]
+so101-setup = "so101_collector.scripts.setup_rig:main"
 so101-record = "so101_collector.scripts.record_episodes:main"
 so101-check-cameras = "so101_collector.scripts.check_cameras:main"
 so101-calibrate = "so101_collector.scripts.calibrate_joints:main"

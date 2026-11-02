@@ -110,6 +110,7 @@ class ContinuousDataCollectionRunner:
         last_dt = self._timer.target_dt
         state = RunnerState.WARMUP
         last_camera_warning = 0.0
+        last_home_hint = 0.0
         last_report = started
         reset_active = False
         failure = False
@@ -184,28 +185,44 @@ class ContinuousDataCollectionRunner:
                             logger.warning("waiting for cameras: %s", exc)
                             last_camera_warning = tick_started
                     else:
-                        if not self._writer.episode_active:
-                            index = self._writer.start_episode(self._task)
-                            self._visualizer.log_event(
-                                "episode_started", f"Recording episode {index:06d}"
-                            )
-                        state = RunnerState.RECORDING
-                        self._writer.append(
-                            FrameSample(tick_started, measured.positions, applied, base, wrist)
-                        )
-                        stats.frames_recorded += 1
-                        if not has_sample:
-                            capture_start = tick_started
-                            has_sample = True
-                        dt_sync_ms = dt_sync * 1000.0
                         error = np.abs(measured.positions - home)
                         if np.any(error > self._exit):
                             armed = True
-                        elif armed and np.all(error <= self._enter):
-                            self._writer.save_episode(self._task, success=False)
-                            stats.episodes_saved += 1
-                            armed = False
-                            self._visualizer.log_event("episode_saved", "Arm returned home")
+                        if not self._writer.episode_active and armed:
+                            # Episodes open on departure, never while parked at
+                            # home, so they cannot begin with idle frames.
+                            index = self._writer.start_episode(self._task)
+                            logger.info("arm left the home pose; recording episode %06d", index)
+                            self._visualizer.log_event(
+                                "episode_started", f"Recording episode {index:06d}"
+                            )
+                        if not self._writer.episode_active:
+                            state = RunnerState.IDLE
+                            if tick_started - last_home_hint >= 15.0:
+                                last_home_hint = tick_started
+                                logger.info(
+                                    "parked at the home pose (max joint error %.1f deg); "
+                                    "recording starts once a joint leaves it by > %.1f deg",
+                                    float(error.max()),
+                                    self._exit,
+                                )
+                        else:
+                            state = RunnerState.RECORDING
+                            self._writer.append(
+                                FrameSample(tick_started, measured.positions, applied, base, wrist)
+                            )
+                            stats.frames_recorded += 1
+                            if not has_sample:
+                                capture_start = tick_started
+                                has_sample = True
+                            dt_sync_ms = dt_sync * 1000.0
+                            if armed and np.all(error <= self._enter):
+                                self._writer.save_episode(self._task, success=False)
+                                stats.episodes_saved += 1
+                                armed = False
+                                self._visualizer.log_event(
+                                    "episode_saved", "Arm returned to home pose"
+                                )
 
                 self._visualizer.log_step(
                     session_time_s=tick_started - started,

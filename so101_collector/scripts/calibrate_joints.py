@@ -6,6 +6,7 @@ pipeline converts them to degrees using a per-joint ``offset_deg``.
     so101-calibrate --show                          # current ticks and degrees
     so101-calibrate --capture min home max          # guided capture
     so101-calibrate --capture min --write            # capture and save
+    so101-calibrate --capture-home --write           # tucked-in pose -> home_deg
     so101-calibrate --set shoulder_lift=-3.5        # direct value
 
 Torque is disabled during capture so the joints move freely, then re-enabled
@@ -17,8 +18,10 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from so101_collector.config import JOINT_NAMES, RobotConfig, default_config_dir
@@ -64,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture", nargs="+", choices=REFERENCE_POINTS, default=None,
                         metavar="{min,home,max}",
                         help="interactively capture reference positions")
+    parser.add_argument("--capture-home", action="store_true",
+                        help="capture the tucked-in pose into home_deg (torque off, interactive)")
+    parser.add_argument("--repeat", type=int, default=3, metavar="N",
+                        help="samples averaged by --capture-home (1-10)")
     parser.add_argument("--set", action="append", default=None, metavar="JOINT=DEG",
                         help="set an offset directly (repeatable)")
     parser.add_argument("--write", action="store_true",
@@ -147,13 +154,90 @@ def _capture(
     return new_offsets
 
 
-def _apply_offsets(config: RobotConfig, offsets: dict[str, float]) -> RobotConfig:
-    """Return a copy of ``config`` with the given per-joint offsets applied."""
+def _apply_fields(config: RobotConfig, field: str, values: dict[str, float]) -> RobotConfig:
+    """Return a copy of ``config`` with one numeric joint field replaced."""
     payload = config.to_dict()
     for joint in payload["joints"]:
-        if joint["name"] in offsets:
-            joint["offset_deg"] = offsets[joint["name"]]
+        if joint["name"] in values:
+            joint[field] = values[joint["name"]]
     return RobotConfig.from_dict(payload)
+
+
+def _apply_offsets(config: RobotConfig, offsets: dict[str, float]) -> RobotConfig:
+    """Return a copy of ``config`` with the given per-joint offsets applied."""
+    return _apply_fields(config, "offset_deg", offsets)
+
+
+def summarize_home_samples(samples: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Return the mean tucked pose and the per-joint spread across samples."""
+    if not samples:
+        raise ValueError("at least one sample is required")
+    stack = np.vstack([np.asarray(sample, dtype=np.float64) for sample in samples])
+    return stack.mean(axis=0), stack.max(axis=0) - stack.min(axis=0)
+
+
+def validate_home_pose(
+    config: RobotConfig, home: np.ndarray, indices: list[int] | None = None
+) -> None:
+    """Reject a captured home pose that falls outside the configured limits."""
+    selected = list(range(len(config.joints))) if indices is None else list(indices)
+    problems: list[str] = []
+    for index in selected:
+        spec = config.joints[index]
+        value = float(home[index])
+        if not spec.min_deg <= value <= spec.max_deg:
+            problems.append(
+                f"{spec.name} {value:.1f} deg outside [{spec.min_deg:.1f}, {spec.max_deg:.1f}]"
+            )
+    if problems:
+        raise SO101Error(
+            "captured home pose is outside the configured joint limits: "
+            + "; ".join(problems)
+            + " - widen min_deg/max_deg for those joints first"
+        )
+
+
+def _capture_home(
+    interface: SO101HardwareInterface,
+    config: RobotConfig,
+    indices: list[int],
+    repeats: int,
+) -> dict[str, float]:
+    """Sample the tucked-in pose by hand and return new ``home_deg`` values."""
+    if not sys.stdin.isatty():
+        raise SO101Error("--capture-home is interactive and requires a TTY")
+    if not 1 <= repeats <= 10:
+        raise SO101Error(f"--repeat must be between 1 and 10, got {repeats}")
+    print("Torque DISABLED - move the arm into its fully tucked-in home pose.")
+    interface.set_torque(False)
+    try:
+        input("  hold the tucked-in pose and press Enter...")
+        samples: list[np.ndarray] = []
+        for index in range(repeats):
+            samples.append(np.asarray(interface.read_state().positions, dtype=np.float64))
+            if index + 1 < repeats:
+                time.sleep(0.3)
+    finally:
+        try:
+            interface.set_torque(True)
+            print("Torque re-enabled (arm holds its position).")
+        except SO101Error as exc:
+            logger.warning("could not re-enable torque: %s", exc)
+
+    mean, spread = summarize_home_samples(samples)
+    print(f"\n{'joint':<14} {'home':>8} {'spread':>8}")
+    for index in indices:
+        spec = config.joints[index]
+        print(f"{spec.name:<14} {mean[index]:>8.2f} {spread[index]:>8.2f}")
+    worst = indices[int(np.argmax(spread[indices]))]
+    if spread[worst] > 2.0:
+        logger.warning(
+            "joint '%s' moved %.1f deg between samples; hold the pose still and retry",
+            config.joints[worst].name,
+            spread[worst],
+        )
+    validate_home_pose(config, mean, indices)
+    return {config.joints[index].name: float(mean[index]) for index in indices}
 
 
 def _write_config(path: Path, config: RobotConfig) -> None:
@@ -173,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    if not (args.show or args.capture or args.set):
+    if not (args.show or args.capture or args.capture_home or args.set):
         args.show = True  # default action
 
     config_dir = args.config_dir or default_config_dir()
@@ -193,17 +277,30 @@ def main(argv: list[str] | None = None) -> int:
         if args.show:
             _show_state(interface, config, indices)
 
+        if args.capture and args.capture_home:
+            raise SO101Error("use --capture (offset references) and --capture-home separately")
+
         offsets: dict[str, float] = {}
         if args.set:
             offsets.update(parse_set_points(args.set))
         if args.capture:
             offsets.update(_capture(interface, config, indices, list(args.capture)))
+        homes: dict[str, float] = {}
+        if args.capture_home:
+            homes = _capture_home(interface, config, indices, args.repeat)
 
-        if offsets:
-            updated = _apply_offsets(config, offsets)
-            print("\nProposed offsets:")
-            for name, value in sorted(offsets.items()):
-                print(f"  {name}: {value:+.2f} deg")
+        if offsets or homes:
+            updated = config
+            if offsets:
+                updated = _apply_fields(updated, "offset_deg", offsets)
+                print("\nProposed offsets:")
+                for name, value in sorted(offsets.items()):
+                    print(f"  {name}: {value:+.2f} deg")
+            if homes:
+                updated = _apply_fields(updated, "home_deg", homes)
+                print("\nProposed home pose:")
+                for name, value in sorted(homes.items()):
+                    print(f"  {name}: {value:+.1f} deg")
             if args.write:
                 _write_config(config_path, updated)
                 print(f"Written to {config_path}")

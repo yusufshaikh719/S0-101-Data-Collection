@@ -15,11 +15,18 @@ pip install -e ".[visualize]"    # + rerun-sdk
 ## Usage
 
 ```bash
+# Discover devices, write both configs, then pre-flight the rig
+so101-setup
+so101-setup --check          # repeat checks any time, no prompts
+
 # Check the rig against the timing requirements
 so101-check-cameras --snapshot-dir ./camera_snapshots
 
 # Calibrate joint offsets with torque off, then save them
 so101-calibrate --capture min home max --write
+
+# Capture the tucked-in pose that ends an episode
+so101-calibrate --capture-home --write
 
 # Record with a 1:1 leader arm and a live Rerun viewer
 so101-record --teleop leader --repo-id floor_pick_session_01 --rerun
@@ -41,24 +48,25 @@ so101-record --teleop leader --rerun-save session_01.rrd
 
 ### Recording protocol
 
-| Key / button   | Action                                      |
-|----------------|---------------------------------------------|
-| automatic      | Capture starts once the cameras are ready   |
-| Enter / green  | Split the current episode                   |
-| Esc / red      | Discard the current episode                 |
-| R              | Drive the arm to its home pose              |
-| Q / Ctrl-C     | Save the partial episode and quit           |
+| Key / button   | Action                                          |
+|----------------|-------------------------------------------------|
+| automatic      | Starts on departure from home; splits on return |
+| Enter / green  | Split the current episode                       |
+| Esc / red      | Discard the current episode                     |
+| R              | Drive the arm to its home pose                  |
+| Q / Ctrl-C     | Save the partial episode and quit               |
 
-An episode ends when all six measured joints, gripper included, are within
-`--home-tolerance` (5° by default) of their configured `home_deg`. A new split
-is armed once any joint moves beyond `--home-exit-tolerance` (8°), so the arm
-does not split repeatedly while parked at home. The sample that reaches home
-closes the episode; the next sample opens a new one.
+An episode starts when any measured joint leaves the tucked pose by more than
+`--home-exit-tolerance` (8° by default), so time spent parked at home is not
+recorded. It ends when all six joints, gripper included, are within
+`--home-tolerance` (5°) of `home_deg`; the sample that reaches home is the last
+frame of the episode and the following departure opens the next one.
 
-Set each `home_deg` in `configs/robot_config.yaml` to the angle measured at
-the tucked-in pose, and calibrate `offset_deg`, before collecting data. The
-shipped values are placeholders. `so101-calibrate` treats them as reference
-values; it does not find the tucked-in pose.
+Calibrate `offset_deg` first (`so101-calibrate --capture min`), then run
+`so101-calibrate --capture-home --write` to sample the tucked pose three times
+and write the mean into `home_deg`. The shipped values are placeholders; a pose
+outside the configured joint limits is rejected. `so101-setup --check` prints
+the per-joint distance from home so you can confirm detection fires.
 
 For floor pickup, split a demonstration into pre-grasp alignment, descent and
 grasp with a short contact pause, then lift and hold. Vary object position
